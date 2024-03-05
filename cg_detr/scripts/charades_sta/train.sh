@@ -11,7 +11,7 @@ eval_path=data/charades_sta/charades_sta_test_tvr_format.jsonl
 eval_split_name=val
 
 ######## setup video+text features
-feat_root=../features/charades
+feat_root=features/charades
 
 # video features
 v_feat_dim=0

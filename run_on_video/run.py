@@ -1,4 +1,7 @@
 import torch
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from run_on_video.data_utils import ClipFeatureExtractor
 from run_on_video.model_utils import build_inference_model
@@ -152,6 +155,7 @@ def run_example():
         queries = load_jsonl(query_path)
     query_text_list = [e["query"] for e in queries]
     ckpt_path = "run_on_video/CLIP_ckpt/qvhighlights_onlyCLIP/model_best.ckpt"
+    # ckpt_path = "results_tacos/tacos-video_tef-exp-332121-ndum_50-nprom_2_10/model_best.ckpt"
 
     # run predictions
     print("Build models...")

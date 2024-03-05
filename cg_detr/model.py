@@ -238,7 +238,7 @@ class CGDETR(nn.Module):
             ###########
         else:
             moment_mask_ = None
-
+############################################################################################################################################################################
         # for t2vidavg sal token
         vidsrc_ = torch.zeros((len(src_vid), 1, self.hidden_dim)).cuda()
         for i in range(len(src_vid)):

@@ -4,6 +4,11 @@ import json
 import time
 import copy
 import multiprocessing as mp
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from standalone_eval.utils import compute_average_precision_detection, \
     compute_temporal_iou_batch_cross, compute_temporal_iou_batch_paired, load_jsonl, get_ap
 
@@ -136,7 +141,9 @@ def get_data_by_range(submission, ground_truth, len_range):
 
 def eval_moment_retrieval(submission, ground_truth, verbose=True):
     length_ranges = [[0, 10], [10, 30], [30, 150], [0, 150], ]  #
+    # length_ranges = [[30, 60], [60, 90], [90, 120], [120, 150], ]
     range_names = ["short", "middle", "long", "full"]
+    # range_names = ["30—60", "60-90", "90-120", "120-150"]
 
     ret_metrics = {}
     for l_range, name in zip(length_ranges, range_names):

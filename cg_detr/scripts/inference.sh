@@ -1,6 +1,7 @@
 ckpt_path=$1
 eval_split_name=$2
 eval_path=data/highlight_${eval_split_name}_release.jsonl
+# eval_path=data/tacos/${eval_split_name}.jsonl
 echo ${ckpt_path}
 echo ${eval_split_name}
 echo ${eval_path}

@@ -15,7 +15,7 @@ eval_split_name=val
 
 ######## setup video+text features
 # feat_root=../features/tvsum
-feat_root=../features/youtube_uni
+feat_root=features/youtube_uni
 
 # # video features
 v_feat_dim=2816

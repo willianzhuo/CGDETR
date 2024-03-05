@@ -45,7 +45,7 @@ def eval_epoch_post_processing(submission, opt, gt_data, save_submission_filenam
     submission_path = os.path.join(opt.results_dir, save_submission_filename)
     save_jsonl(submission, submission_path)
 
-    if opt.eval_split_name in ["val"]:  # since test_public has no GT
+    if opt.eval_split_name in ["val", "test"]:  # since test_public has no GT
         metrics = eval_submission(
             submission, gt_data,
             verbose=opt.debug, match_number=not opt.debug
@@ -214,7 +214,7 @@ def compute_hl_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
     return submmission, loss_meters 
 
 
-
+# for MR
 @torch.no_grad()
 def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb_writer=None):
     model.eval()
@@ -252,7 +252,7 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
         # compose predictions
         for idx, (meta, spans, score) in enumerate(zip(query_meta, pred_spans.cpu(), scores.cpu())):
             if opt.span_loss_type == "l1":
-                spans = span_cxw_to_xx(spans) * meta["duration"]
+                spans = span_cxw_to_xx(spans) * meta["duration"] # cxw：(center_x, width)
                 spans = torch.clamp(spans, 0, meta["duration"])
             # # (#queries, 3), [st(float), ed(float), score(float)]
             cur_ranked_preds = torch.cat([spans, score[:, None]], dim=1).tolist()
@@ -459,7 +459,6 @@ def start_inference(train_opt=None, split=None, splitfile=None):
 
 
     model, criterion, _, _ = setup_model(opt)
-
     save_submission_filename = "hl_{}_submission.jsonl".format(
         opt.eval_split_name)
     # save_submission_filename = "inference_{}_{}_{}_preds.jsonl".format(

@@ -11,7 +11,7 @@ eval_path=data/highlight_val_release.jsonl
 eval_split_name=val
 
 ######## setup video+text features
-feat_root=../features/qvhighlight
+feat_root=features/qvhighlight
 
 # video features
 v_feat_dim=0

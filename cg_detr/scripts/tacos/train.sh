@@ -11,7 +11,7 @@ eval_path=data/tacos/val.jsonl
 eval_split_name=val
 
 ######## setup video+text features
-feat_root=../features/tacos
+feat_root=features/tacos
 
 # video features
 v_feat_dim=0
