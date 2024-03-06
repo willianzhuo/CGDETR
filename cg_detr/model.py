@@ -15,6 +15,9 @@ from cg_detr.misc import accuracy
 import numpy as np
 import copy
 
+# from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
+
 def inverse_sigmoid(x, eps=1e-3):
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
@@ -357,6 +360,75 @@ class CGDETR(nn.Module):
                 for idx, d in enumerate(proj_queries[:-1]):
                     out['aux_outputs'][idx].update(dict(proj_queries=d, proj_txt_mem=proj_txt_mem))
         return out
+
+
+class SAMMIMIC(nn.Module):
+    def __init__(self, transformer, position_embed, txt_position_embed, txt_dim, vid_dim,
+                 num_queries, input_dropout, aux_loss=False,
+                 contrastive_align_loss=False, contrastive_hdim=64,
+                 max_v_l=75, span_loss_type="l1", use_txt_pos=False, n_input_proj=2, aud_dim=0, args=None):        
+        super().__init__()
+        self.transformer = transformer
+        self.num_queries = num_queries
+        self.position_embed = position_embed
+        self.txt_position_embed = txt_position_embed
+        self.txt_dim = txt_dim
+        self.vid_dim = vid_dim
+        hidden_dim = transformer.d_model
+        self.aux_loss = aux_loss
+        normalize_before = False
+        self.contrastive_align_loss = contrastive_align_loss
+        self.contrastive_hdim = contrastive_hdim
+        self.max_v_l = max_v_l
+        self.span_loss_type = span_loss_type
+        self.use_txt_pos = use_txt_pos
+        self.n_input_proj = n_input_proj
+        self.aud_dim = aud_dim
+        self.args = args
+
+        # Video Transformer Encoder
+        self.video_encoder_layer = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu") #TODO
+        self.video_encoder = TransformerEncoder(self.video_encoder_layer, num_layers=args.num_encoder_layers)
+
+        # Text Transformer Encoder
+        self.text_encoder_layer = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu")
+        self.text_encoder = TransformerEncoder(self.text_encoder_layer, num_layers=args.num_encoder_layers)
+
+        # Transformer Decoder
+        self.decoder_layer = TransformerDecoderLayer(d_model=256, nhead=2, dropout=args.dropout)
+        self.decoder = TransformerDecoder(self.decoder_layer, num_layers=3)
+
+        # Project video and text input to the same hidden dimension
+        self.video_input_proj = nn.Linear(vid_dim, hidden_dim)
+        self.text_input_proj = nn.Linear(txt_dim, hidden_dim)
+
+    def forward(self, src_txt, src_txt_mask, src_vid, src_vid_mask, vid, qid, src_aud=None, src_aud_mask=None, targets=None):
+        # Project inputswo tensors:
+        src_vid = self.video_input_proj(src_vid) # bsz, L_vid, d torch.Size([32, 75, 2306]) -> torch.Size([32, 75, 256])
+        src_txt = self.text_input_proj(src_txt) # bsz, L_txt, d torch.Size([32, 25, 512]) -> torch.Size([32, 25, 256])
+
+        # Add position embeddings
+        # src_vid = src_vid + self.position_embed(src_vid_mask)
+        # src_txt = src_txt + self.txt_position_embed(src_txt_mask)
+        pos_vid = self.position_embed(src_vid, src_vid_mask) # (bsz, L_vid, d) mask: (bsz, L_vid)(32,75) pos: (bsz, L_vid, d) torch.Size([32, 75, 256])
+        pos_txt = self.txt_position_embed(src_txt) if self.use_txt_pos else torch.zeros_like(src_txt)  # (bsz, L_txt, d) torch.Size([32, 25, 256])
+
+        # Pass through the encoders
+        video_memory = self.video_encoder(pos_vid) # (bsz, L_vid, d) torch.Size([32, 75, 256])
+        text_memory = self.text_encoder(pos_txt) # 形状[32, 25, 256]
+
+        print("text_memory shape:", text_memory.shape)
+        print("video_memory shape:", video_memory.shape)
+
+        # Decoder (cross attention between text query and video key/value)
+        output = self.decoder(tgt=text_memory, memory=video_memory)
+
+        # if targets is not None:
+        #     # Compute loss
+        #     loss = self.criterion(output, targets)
+        #     return output, loss
+        # else:
+        return output
 
 class SetCriterion(nn.Module):
     """ This class computes the loss for DETR.
@@ -986,7 +1058,23 @@ def build_model(args):
     position_embedding, txt_position_embedding = build_position_encoding(args)
 
     if args.a_feat_dir is None:
-        model = CGDETR(
+        # model = CGDETR(
+        #     transformer,
+        #     position_embedding,
+        #     txt_position_embedding,
+        #     txt_dim=args.t_feat_dim,
+        #     vid_dim=args.v_feat_dim,
+        #     num_queries=args.num_queries,
+        #     input_dropout=args.input_dropout,
+        #     aux_loss=args.aux_loss,
+        #     contrastive_align_loss=args.contrastive_align_loss,
+        #     contrastive_hdim=args.contrastive_hdim,
+        #     span_loss_type=args.span_loss_type,
+        #     use_txt_pos=args.use_txt_pos,
+        #     n_input_proj=args.n_input_proj,
+        #     args=args
+        # )
+        model = SAMMIMIC(
             transformer,
             position_embedding,
             txt_position_embedding,
@@ -1003,13 +1091,29 @@ def build_model(args):
             args=args
         )
     else:
-        model = CGDETR(
+        # model = CGDETR(
+        #     transformer,
+        #     position_embedding,
+        #     txt_position_embedding,
+        #     txt_dim=args.t_feat_dim,
+        #     vid_dim=args.v_feat_dim,
+        #     aud_dim=args.a_feat_dim,
+        #     num_queries=args.num_queries,
+        #     input_dropout=args.input_dropout,
+        #     aux_loss=args.aux_loss,
+        #     contrastive_align_loss=args.contrastive_align_loss,
+        #     contrastive_hdim=args.contrastive_hdim,
+        #     span_loss_type=args.span_loss_type,
+        #     use_txt_pos=args.use_txt_pos,
+        #     n_input_proj=args.n_input_proj,
+        #     args=args
+        # )
+        model = SAMMIMIC(
             transformer,
             position_embedding,
             txt_position_embedding,
             txt_dim=args.t_feat_dim,
             vid_dim=args.v_feat_dim,
-            aud_dim=args.a_feat_dim,
             num_queries=args.num_queries,
             input_dropout=args.input_dropout,
             aux_loss=args.aux_loss,

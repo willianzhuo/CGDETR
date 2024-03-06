@@ -14,7 +14,7 @@
                 "--eval_path", "data/highlight_val_release.jsonl",
                 "--eval_split_name", "val",
                 "--v_feat_dirs", "features/qvhighlight/slowfast_features",
-                "--v_feat_dim", "2816",
+                "--v_feat_dim", "2304",
                 "--t_feat_dir", "features/qvhighlight/clip_text_features/",
                 "--t_feat_dim", "512",
                 "--bsz", "32",
@@ -27,13 +27,14 @@
                 "--dummy_layers", "2",
                 "--sent_layers", "1",
                 "--max_v_l", "75",
-                "--max_q_l", "32"
+                "--max_q_l", "32",
+                "--num_encoder_layers", "3",
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
             },
             "cwd": "${workspaceFolder}",
-            "python": "/home/zhuocao/zhuocao/anaconda3/envs/video/bin/python" 
+            "python": "/home/zhuocao/zhuocao/anaconda3/envs/video_new/bin/python" 
         }
     ]
 }
