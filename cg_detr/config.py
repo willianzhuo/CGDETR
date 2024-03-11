@@ -5,6 +5,7 @@ import argparse
 
 from utils.basic_utils import mkdirp, load_json, save_json, make_zipfile, dict_to_markdown
 import shutil
+import re
 
 class BaseOptions(object):
     saved_option_filename = "opt.json"
@@ -212,9 +213,10 @@ class BaseOptions(object):
 
             ctx_str = opt.ctx_mode + "_sub" if any(["sub_ctx" in p for p in opt.v_feat_dirs]) else opt.ctx_mode
             opt.results_dir = os.path.join(opt.results_root,
-                                           "-".join([opt.dset_name, ctx_str, opt.exp_id,
-                                                     str(opt.enc_layers) + str(opt.dec_layers) + str(opt.t2v_layers) + str(opt.moment_layers) + str(opt.dummy_layers) + str(opt.sent_layers),
-                                                     'ndum_' + str(opt.num_dummies), 'nprom_' + str(opt.num_prompts) + '_' + str(opt.total_prompts)]))
+                                           "-".join([opt.dset_name, ctx_str, opt.exp_id, time.strftime("%Y-%m-%d-%H-%M-%S")]))
+                                                    #  str(opt.enc_layers) + str(opt.dec_layers) + str(opt.t2v_layers) + str(opt.moment_layers) + str(opt.dummy_layers) + str(opt.sent_layers),
+                                                    #  'ndum_' + str(opt.num_dummies), 'nprom_' + str(opt.num_prompts) + '_' + str(opt.total_prompts)])) 
+            
             mkdirp(opt.results_dir)
             save_fns = ['cg_detr/model.py', 'cg_detr/transformer.py']
             for save_fn in save_fns:
