@@ -31,7 +31,8 @@
                 "--num_encoder_layers", "3",
             ],
             "env": {
-                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}",
+                //"CUDA_VISIBLE_DEVICES": "0",
             },
             "cwd": "${workspaceFolder}",
             "python": "/home/zhuocao/zhuocao/anaconda3/envs/video_new/bin/python" 

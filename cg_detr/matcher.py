@@ -55,24 +55,24 @@ class HungarianMatcher(nn.Module):
                 len(index_i) = len(index_j) = min(num_queries, num_target_spans)
         """
         bs, num_queries = outputs["pred_spans"].shape[:2]
-        targets = targets["span_labels"]
+        targets = targets["span_labels"] # 长度为32的list，每个元素是一个tensor，表示一个query对应的target spans 可能有多个
 
         # Also concat the target labels and spans
-        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
-        tgt_spans = torch.cat([v["spans"] for v in targets])  # [num_target_spans in batch, 2]
-        tgt_ids = torch.full([len(tgt_spans)], self.foreground_label)   # [total #spans in the batch]
+        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes] [32*10, 2] 展平并对最后一个维度进行softmax
+        tgt_spans = torch.cat([v["spans"] for v in targets])  # [num_target_spans in batch, 2] [57, 2] 一个batch中所有的目标span
+        tgt_ids = torch.full([len(tgt_spans)], self.foreground_label)   # [total #spans in the batch] [57] 全0
 
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - prob[target class].
         # The 1 is a constant that doesn't change the matching, it can be omitted.
-        cost_class = -out_prob[:, tgt_ids]  # [batch_size * num_queries, total #spans in the batch]
+        cost_class = -out_prob[:, tgt_ids]  # [batch_size * num_queries, total #spans in the batch] [320, 57] TODO
 
         if self.span_loss_type == "l1":
             # We flatten to compute the cost matrices in a batch
-            out_spans = outputs["pred_spans"].flatten(0, 1)  # [batch_size * num_queries, 2]
+            out_spans = outputs["pred_spans"].flatten(0, 1)  # [batch_size * num_queries, 2] [320, 2]
 
             # Compute the L1 cost between spans
-            cost_span = torch.cdist(out_spans, tgt_spans, p=1)  # [batch_size * num_queries, total #spans in the batch]
+            cost_span = torch.cdist(out_spans, tgt_spans, p=1)  # [batch_size * num_queries, total #spans in the batch] [320, 57] [320，2] [57, 2]
 
             # Compute the giou cost between spans
             # [batch_size * num_queries, total #spans in the batch]
@@ -93,11 +93,11 @@ class HungarianMatcher(nn.Module):
         # Final cost matrix
         # import ipdb; ipdb.set_trace()
         C = self.cost_span * cost_span + self.cost_giou * cost_giou + self.cost_class * cost_class
-        C = C.view(bs, num_queries, -1).cpu()
+        C = C.view(bs, num_queries, -1).cpu() # [batch_size, num_queries, total #spans in the batch] [32, 10, 57]
 
-        sizes = [len(v["spans"]) for v in targets]
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+        sizes = [len(v["spans"]) for v in targets] 
+        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))] # c: [32, 10, 1] #[(array([4]), array([0])), (array([0]), array([0])), (array([3]), array([0])), (array([3]), array([0])), (array([3]), array([0])), (array([0]), array([0])), (array([9]), array([0])), (array([4]), array([0])), (array([5]), array([0])), (array([3, 7]), array([1, 0])), (array([0]), array([0])), (array([3]), array([0])), (array([0, 3]), array([0, 1])), (array([7]), array([0])), (array([0]), array([0])), (array([3]), array([0])), (array([3]), array([0])), (array([3]), array([0])), (array([0]), array([0])), (array([1, 3, 7, 8]), array([2, 1, 0, 3])), (array([0, 3, 4, 7]), array([0, 3, 1, 2])), (array([0, 3, 4, 7]), array([2, 0, 1, 3])), (array([3, 7]), array([1, 0])), (array([0, 3]), array([1, 0])), (array([0, 3, 4, 7, 9]), array([0, 3, 4, 2, 1])), (array([0]), array([0])), (array([0, 3, 7]), array([0, 2, 1])), (array([7]), array([0])), (array([0]), array([0])), (array([3, 7, 8]), array([1, 0, 2])), (array([0]), array([0])), (array([0, 1, 3, 4, 7]), array([0, 1, 4, 2, 3]))]
+        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices] 
 
 
 def build_matcher(args):

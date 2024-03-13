@@ -120,7 +120,7 @@ def train(model, criterion, optimizer, lr_scheduler, train_dataset, val_dataset,
     )
 
     prev_best_score = 0.
-    es_cnt = 0
+    es_cnt = 0 # early stop counter
     # start_epoch = 0
     if opt.start_epoch is None:
         start_epoch = -1 if opt.eval_untrained else 0
