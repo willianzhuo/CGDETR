@@ -179,19 +179,28 @@ class Transformer(nn.Module):
         src_, _ = self.t2v_encoder(src_, src_key_padding_mask=mask_, pos=pos_,
                                              video_length=video_length, dummy=False)  # (L, batch_size, d) Figure 2 Sec. 3.4 Cross-Attention
 
-        src = torch.cat([src_, t2v_src], dim=0) # Sec. 3.4的输出和Sec. 3.2的输出拼接 (1+143, 32, 256)
-        mask = torch.cat([mask_, mask], dim=1) # (32, 145)
-        pos_embed = torch.cat([pos_, pos_embed], dim=0) # (144, 32, 256)
+        # src = torch.cat([src_, t2v_src], dim=0) # Sec. 3.4的输出和Sec. 3.2的输出拼接 (1+143, 32, 256)
+        # mask = torch.cat([mask_, mask], dim=1) # (32, 145)
+        # pos_embed = torch.cat([pos_, pos_embed], dim=0) # (144, 32, 256)
 
-        src = src[:video_length + 1] # (1+75, 32, 256) 包含Saliency Token和视频的信息 作为Figure 2 prediction transformer encoder的输入 
-        mask = mask[:, :video_length + 1] # torch.Size([32, 76])
-        pos_embed = pos_embed[:video_length + 1] # torch.Size([76, 32, 256])
+        src = t2v_src[:video_length] # Sec. 3.2的输出取出video的token直接做输入 (75, 32, 256）
+        mask = mask[:, :video_length] # (32, 75)
+        pos_embed = pos_embed[:video_length] # (75, 32, 256)
+
+        # src = src[:video_length + 1] # (1+75, 32, 256) 包含Saliency Token和视频的信息 作为Figure 2 prediction transformer encoder的输入 
+        # mask = mask[:, :video_length + 1] # torch.Size([32, 76])
+        # pos_embed = pos_embed[:video_length + 1] # torch.Size([76, 32, 256])
 
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)  # (L, batch_size, d) Figure 2 prediction transformer encoder
-        memory_global, memory_local = memory[0], memory[1:] # memory_global: (32, 256) memory_local: (75, 32, 256)
-        memory_local += memory_global.unsqueeze(0).repeat(memory_local.size(0), 1, 1) # 把global信息加到local上
-        mask_local = mask[:, 1:]
-        pos_embed_local = pos_embed[1:]
+        # memory_global, memory_local = memory[0], memory[1:] # memory_global: (32, 256) memory_local: (75, 32, 256)
+        # memory_local += memory_global.unsqueeze(0).repeat(memory_local.size(0), 1, 1) # 把global信息加到local上
+        # mask_local = mask[:, 1:]
+        # pos_embed_local = pos_embed[1:]
+
+        memory_local = memory# memory_global: (32, 256) memory_local: (75, 32, 256)
+        memory_global = memory_local.mean(0) # memory_global: (32, 256) memory_local: (75, 32, 256)
+        mask_local = mask
+        pos_embed_local = pos_embed
 
         tgt = torch.zeros(refpoint_embed.shape[0], bs, d).cuda() # (#queries, batch_size, d) torch.Size([10, 32, 256]) refpoint_embed:[10, 32, 2]
         hs, references = self.decoder(tgt, memory_local, memory_key_padding_mask=mask_local,

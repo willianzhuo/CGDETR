@@ -823,7 +823,7 @@ class SetCriterion(nn.Module):
             BCEcriterion = nn.BCELoss()
             bceloss = BCEcriterion(logits, labels_x)
 
-            loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_saliency_attn
+            loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_saliency_attn # 分别对应文章中的L_{rctl}, L_{bce}, L_{saliency}
             loss_saliency += (loss_saliency_attn * self.args.lw_wattn)
         return {"loss_saliency": loss_saliency}
 

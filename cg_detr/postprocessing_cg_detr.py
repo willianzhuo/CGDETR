@@ -39,7 +39,7 @@ class PostProcessorDETR:
     def clip_min_max_timestamps(self, windows):
         """
         windows: (#windows, 2)  torch.Tensor
-        ensure timestamps for all windows is within [min_val, max_val], clip is out of boundaries.
+        ensure timestamps for all windows is within [min_val, max_val], clip is out of boundaries. 确保所有窗口的时间戳都在视频长度范围之内，超出边界的部分被剪切。
         """
         return torch.clamp(windows, min=self.min_ts_val, max=self.max_ts_val)
 
