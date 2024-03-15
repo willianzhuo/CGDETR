@@ -96,6 +96,8 @@ class CGDETR(nn.Module):
         self.use_txt_pos = use_txt_pos
         self.n_input_proj = n_input_proj # number of layers for input projection控制线性层的数量
         self.query_embed = nn.Embedding(num_queries, 2) # 控制最终输出的预测moment的数量 用于生成查询嵌入
+        # 修改query embed的初始化方式，确保第二个值比第一个值大
+        self.query_embed.weight.data[:, 0] = torch.linspace(0, 1, steps=num_queries)
         relu_args = [True] * 3
         relu_args[n_input_proj-1] = False
         self.input_txt_proj = nn.Sequential(*[
@@ -184,29 +186,37 @@ class CGDETR(nn.Module):
 
         ######Sec. 3.2 insert dummy token in front of txt 
         txt_dummy = self.dummy_rep_token.reshape([1, self.args.num_dummies, self.hidden_dim]).repeat(src_txt.shape[0], 1, 1) #创建一个新的张量 txt_dummy，它的每一行都是 self.dummy_rep_token 的一个副本，总共有 src_txt.shape[0] 行
-        src_txt_dummy = torch.cat([txt_dummy, src_txt], dim=1) # 把dummy token插入到src_txt的前面
+        # src_txt_dummy = torch.cat([txt_dummy, src_txt], dim=1) # 把dummy token插入到src_txt的前面
+        src_txt_dummy = src_txt # delete dummy
 
 
         mask_txt = torch.tensor([[True] * self.args.num_dummies]).to(src_txt_mask.device).repeat(src_txt_mask.shape[0], 1) # [32,45] 初始dummy的mask
-        src_txt_mask_dummy = torch.cat([mask_txt, src_txt_mask], dim=1) # [32,68] 把dummy的mask插入到src_txt_mask的前面
+        # src_txt_mask_dummy = torch.cat([mask_txt, src_txt_mask], dim=1) # [32,68] 把dummy的mask插入到src_txt_mask的前面
+        src_txt_mask_dummy = src_txt_mask # delete dummy之后的mask
 
         pos_dummy = self.dummy_rep_pos.reshape([1, self.args.num_dummies, self.hidden_dim]).repeat(pos_txt.shape[0], 1, 1) # [32,45,256]创建一个新的张量 pos_dummy，它的每一行都是 self.dummy_rep_pos 的一个副本，总共有 pos_txt.shape[0] 行
-        pos_txt_dummy = torch.cat([pos_dummy, pos_txt], dim=1) # [32,68,256] 把dummy的pos插入到pos_txt的前面
-        src_txt_dummy = src_txt_dummy.permute(1, 0, 2)  # (L, batch_size, d)
+        # pos_txt_dummy = torch.cat([pos_dummy, pos_txt], dim=1) # [32,68,256] 把dummy的pos插入到pos_txt的前面
+        pos_txt_dummy = pos_txt # [32,23,256] delete dummy之后的pos
+        # src_txt_dummy = src_txt_dummy.permute(1, 0, 2)  # (L, batch_size, d)
         pos_txt_dummy = pos_txt_dummy.permute(1, 0, 2)   # (L, batch_size, d)
 
-        memory = self.txtproj_encoder(src_txt_dummy, src_key_padding_mask=~(src_txt_mask_dummy.bool()), pos=pos_txt_dummy)  # (L, batch_size, d) Sec. 3.2 Dummy Encoder 的输出
-        dummy_token = memory[:self.args.num_dummies].permute(1, 0, 2) # Sec. 3.2 Dummy Encoder 的输出截取出的dummy token
+        # memory = self.txtproj_encoder(src_txt_dummy, src_key_padding_mask=~(src_txt_mask_dummy.bool()), pos=pos_txt_dummy)  # (L, batch_size, d) Sec. 3.2 Dummy Encoder 的输出
+        # dummy_token = memory[:self.args.num_dummies].permute(1, 0, 2) # Sec. 3.2 Dummy Encoder 的输出截取出的dummy token
+        dummy_token = torch.zeros(src_txt.shape[0], self.args.num_dummies, self.hidden_dim).to(src_txt.device) # fake dummy[32,45,256]
         pos_txt_dummy = pos_txt_dummy.permute(1, 0, 2)  # (batch_size, L, d) 还原pos_txt_dummy的形状
 
-        src_txt_dummy = torch.cat([dummy_token, src_txt], dim=1) # torch.Size([32, 68, 256])
+        # src_txt_dummy = torch.cat([dummy_token, src_txt], dim=1) # torch.Size([32, 68, 256])
         mask_txt_dummy = torch.tensor([[True] * self.args.num_dummies]).to(src_txt_mask.device).repeat(src_txt_mask.shape[0], 1) # [32,45] 3.2encoder之后的dummy的mask
-        src_txt_mask_dummy = torch.cat([mask_txt_dummy, src_txt_mask], dim=1)
+        # src_txt_mask_dummy = torch.cat([mask_txt_dummy, src_txt_mask], dim=1)
+        src_txt_mask_dummy = src_txt_mask
 
         # Sec. 3.2 Adaptive Cross-Attention 的 Input : Concat video, dummy, txt
         src = torch.cat([src_vid, src_txt_dummy], dim=1)  # (bsz, L_vid+L_txt, d)
         mask = torch.cat([src_vid_mask, src_txt_mask_dummy], dim=1).bool()  # (bsz, L_vid+L_txt)
         pos = torch.cat([pos_vid, pos_txt_dummy], dim=1) # torch.Size([32, 143, 256])
+        # src = src_vid 
+        # mask = src_vid_mask.bool()  
+        # pos = pos_vid 
 
 
 
@@ -354,8 +364,9 @@ class CGDETR(nn.Module):
 
 
         out["t2vattnvalues"] = (attn_weights[:,:,self.args.num_dummies:] * (src_txt_mask.unsqueeze(1).repeat(1, video_length, 1))).sum(2) # (batch_size, L_vid, L_txt) / (batch_size, L_txt)
+        # out["t2vattnvalues"] = (attn_weights[:, :, self.args.num_dummies:] * (src_txt_mask_dummy[:, self.args.num_dummies:].unsqueeze(1).repeat(1, video_length, 1))).sum(2) # (batch_size, L_vid, L_txt) / (batch_size, L_txt)
         out["t2vattnvalues"] = torch.clamp(out["t2vattnvalues"], 0, 1)
-        out["dummy_tokens"] = dummy_token
+        # out["dummy_tokens"] = dummy_token
         out["global_rep_tokens"] = self.global_rep_token
 
 
@@ -1151,7 +1162,9 @@ def build_model(args):
         weight_dict.update(aux_weight_dict)
 
     # losses = ['spans', 'labels', 'saliency', 'ms_align', 'distill', 'orthogonal_dummy']
-    losses = ['spans', 'labels', 'saliency', 'orthogonal_dummy']
+    # losses = ['spans', 'labels', 'saliency', 'orthogonal_dummy']
+    losses = ['spans', 'labels', 'saliency']
+
     if args.contrastive_align_loss:
         losses += ["contrastive_align"]
         

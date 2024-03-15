@@ -117,7 +117,7 @@ class BaseOptions(object):
                             help="Number of attention heads inside the transformer's attentions")
         parser.add_argument('--num_queries', default=10, type=int,
                             help="Number of query slots")
-        parser.add_argument('--num_dummies', default=45, type=int,
+        parser.add_argument('--num_dummies', default=0, type=int,
                             help="Number of dummy tokens")
         parser.add_argument('--total_prompts', default=10, type=int,
                             help="Number of query slots")
