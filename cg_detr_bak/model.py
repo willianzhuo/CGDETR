@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
-DETR model and criterion classes.
+CG-DETR model and criterion classes.
 """
 import torch
 import torch.nn.functional as F
@@ -14,11 +14,16 @@ from cg_detr_bak.position_encoding import build_position_encoding
 from cg_detr_bak.misc import accuracy
 import numpy as np
 import copy
+
+# from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
+
 def inverse_sigmoid(x, eps=1e-3):
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1/x2)
+
 def init_weights(module):
     if isinstance(module, (nn.Linear, nn.Embedding)):
         module.weight.data.normal_(mean=0.0, std=0.02)
@@ -49,7 +54,7 @@ def element_wise_list_equal(listA, listB):
     return res
 
 class CGDETR(nn.Module):
-    """ CGDETR. """
+    """ CG DETR. """
 
     def __init__(self, transformer, position_embed, txt_position_embed, txt_dim, vid_dim,
                  num_queries, input_dropout, aux_loss=False,
@@ -63,7 +68,7 @@ class CGDETR(nn.Module):
             txt_dim: int, text query input dimension
             vid_dim: int, video feature input dimension
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
-                         CG-DETR can detect in a single video.
+                         CG-DETR can detect in a single video. 控制最终输出的预测moment的数量
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
             contrastive_align_loss: If true, perform span - tokens contrastive learning
             contrastive_hdim: dimension used for projecting the embeddings before computing contrastive loss
@@ -84,13 +89,13 @@ class CGDETR(nn.Module):
         self.span_loss_type = span_loss_type
         self.max_v_l = max_v_l
         span_pred_dim = 2 if span_loss_type == "l1" else max_v_l * 2
-        self.span_embed = MLP(hidden_dim, hidden_dim, span_pred_dim, 3)
+        self.span_embed = MLP(hidden_dim, hidden_dim, span_pred_dim, 3) # 用于预测moment的位置
         self.class_embed = nn.Linear(hidden_dim, 2)  # 0: background, 1: foreground
-        self.token_type_embeddings = nn.Embedding(2, hidden_dim)
+        self.token_type_embeddings = nn.Embedding(2, hidden_dim) # 用于区分video和text用，设置嵌入空间的维度为2，即将视频和文本分别嵌入到2维空间中，以便后面输入到transformer中可以区分
         self.token_type_embeddings.apply(init_weights)
         self.use_txt_pos = use_txt_pos
-        self.n_input_proj = n_input_proj
-        self.query_embed = nn.Embedding(num_queries, 2)
+        self.n_input_proj = n_input_proj # number of layers for input projection控制线性层的数量
+        self.query_embed = nn.Embedding(num_queries, 2) # 控制最终输出的预测moment的数量 用于生成查询嵌入
         relu_args = [True] * 3
         relu_args[n_input_proj-1] = False
         self.input_txt_proj = nn.Sequential(*[
@@ -103,7 +108,8 @@ class CGDETR(nn.Module):
             LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[1]),
             LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[2])
         ][:n_input_proj])
-        self.contrastive_align_loss = contrastive_align_loss
+        # Sec. 3.3
+        self.contrastive_align_loss = contrastive_align_loss #是否使用对比对齐损失
         if contrastive_align_loss:
             self.contrastive_align_projection_query = nn.Linear(hidden_dim, contrastive_hdim)
             self.contrastive_align_projection_txt = nn.Linear(hidden_dim, contrastive_hdim)
@@ -111,34 +117,40 @@ class CGDETR(nn.Module):
 
         self.saliency_proj1 = nn.Linear(hidden_dim, hidden_dim)
         self.saliency_proj2 = nn.Linear(hidden_dim, hidden_dim)
-        self.aux_loss = aux_loss
+
+        self.aux_loss = aux_loss #是否使用辅助损失 默认使用
         self.hidden_dim = hidden_dim
+        
+        # Saliency Candidates Pool Figure 5
         self.global_rep_token = torch.nn.Parameter(torch.randn(args.total_prompts, hidden_dim))
         self.global_rep_pos = torch.nn.Parameter(torch.randn(1, hidden_dim))
         self.moment_rep_token = torch.nn.Parameter(torch.randn(hidden_dim))
         self.moment_rep_pos = torch.nn.Parameter(torch.randn(hidden_dim))
 
-        self.dummy_rep_token = torch.nn.Parameter(torch.randn(args.num_dummies, hidden_dim))
+        self.dummy_rep_token = torch.nn.Parameter(torch.randn(args.num_dummies, hidden_dim)) # dummy token qv中默认45个
         self.dummy_rep_pos = torch.nn.Parameter(torch.randn(args.num_dummies, hidden_dim))
         normalize_before = False
-        self.txt_proj_linear = LinearLayer(txt_dim, hidden_dim, layer_norm=True)
-        input_txt_sa_proj = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu", normalize_before)
-        txtproj_encoder_norm = nn.LayerNorm(hidden_dim) if normalize_before else None
-        self.txtproj_encoder = TransformerEncoder(input_txt_sa_proj, args.dummy_layers, txtproj_encoder_norm)
         self.sent_rep_token = torch.nn.Parameter(torch.randn(hidden_dim))
         self.sent_rep_pos = torch.nn.Parameter(torch.randn(hidden_dim))
+
+        self.txt_proj_linear = LinearLayer(txt_dim, hidden_dim, layer_norm=True)
+
+        input_txt_sa_proj = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu", normalize_before)
+        txtproj_encoder_norm = nn.LayerNorm(hidden_dim) if normalize_before else None
+        self.txtproj_encoder = TransformerEncoder(input_txt_sa_proj, args.dummy_layers, txtproj_encoder_norm) # Sec. 3.2 Dummy Encoder
+
         scls_encoder_layer = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu", normalize_before)
         scls_encoder_norm = nn.LayerNorm(hidden_dim) if normalize_before else None
-        self.scls_encoder = TransformerEncoder(scls_encoder_layer, args.sent_layers, scls_encoder_norm)
+        self.scls_encoder = TransformerEncoder(scls_encoder_layer, args.sent_layers, scls_encoder_norm) # Sec. 3.3 sentence token encoder Figure 4 (a) 
 
     def forward(self, src_txt, src_txt_mask, src_vid, src_vid_mask, vid, qid, src_aud=None, src_aud_mask=None, targets=None):
         """The forward expects two tensors:
                - src_txt: [batch_size, L_txt, D_txt]
                - src_txt_mask: [batch_size, L_txt], containing 0 on padded pixels,
-                    will convert to 1 as padding later for transformer
+                    will convert to 1 as padding later for transformer 表示的是query的长度
                - src_vid: [batch_size, L_vid, D_vid]
                - src_vid_mask: [batch_size, L_vid], containing 0 on padded pixels,
-                    will convert to 1 as padding later for transformer
+                    will convert to 1 as padding later for transformer 表示的是video的长度
 
             It returns a dict with the following elements:
                - "pred_spans": The normalized boxes coordinates for all queries, represented as
@@ -149,129 +161,146 @@ class CGDETR(nn.Module):
                                 dictionnaries containing the two above keys for each decoder layer.
         """
 
-        _count = [v.count('_') for v in vid]
-        if self.args.dset_name == 'hl':
-            _position_to_cut = [find_nth(v, '_', _count[i]-1) for i, v in enumerate(vid)]
-            ori_vid = [v[:_position_to_cut[i]] for i, v in enumerate(vid)]
-        else:
-            ori_vid = [v for v in vid]
+        ## For discovering real negative samples
+        if vid is not None: ## for demo (run_on_video/run.py)
+            _count = [v.count('_') for v in vid]
+            if self.args.dset_name == 'hl':
+                _position_to_cut = [find_nth(v, '_', _count[i]-1) for i, v in enumerate(vid)]
+                ori_vid = [v[:_position_to_cut[i]] for i, v in enumerate(vid)]
+            else:
+                ori_vid = [v for v in vid]
 
-        if src_aud is not None:
+        if src_aud is not None: # 是否有音频部分
             src_vid = torch.cat([src_vid, src_aud], dim=2)
+        # Project inputs to the same hidden dimension
         src_vid = self.input_vid_proj(src_vid)
         src_txt = self.input_txt_proj(src_txt)
+        # Add type embeddings
         src_vid = src_vid + self.token_type_embeddings(torch.full_like(src_vid_mask.long(), 1))
         src_txt = src_txt + self.token_type_embeddings(torch.zeros_like(src_txt_mask.long()))
+        # Add position embeddings
         pos_vid = self.position_embed(src_vid, src_vid_mask)  # (bsz, L_vid, d)
-        pos_txt = self.txt_position_embed(src_txt) if self.use_txt_pos else torch.zeros_like(src_txt)  # (bsz, L_txt, d)
+        pos_txt = self.txt_position_embed(src_txt) if self.use_txt_pos else torch.zeros_like(src_txt)  # (bsz, L_txt, d) 默认不用
 
-        ### insert dummy token in front of txt
-        txt_dummy = self.dummy_rep_token.reshape([1, self.args.num_dummies, self.hidden_dim]).repeat(src_txt.shape[0], 1, 1)
-        src_txt_dummy = torch.cat([txt_dummy, src_txt], dim=1)
-        mask_txt = torch.tensor([[True] * self.args.num_dummies]).to(src_txt_mask.device).repeat(src_txt_mask.shape[0], 1)
-        src_txt_mask_dummy = torch.cat([mask_txt, src_txt_mask], dim=1)
+        ######Sec. 3.2 insert dummy token in front of txt 
+        txt_dummy = self.dummy_rep_token.reshape([1, self.args.num_dummies, self.hidden_dim]).repeat(src_txt.shape[0], 1, 1) #创建一个新的张量 txt_dummy，它的每一行都是 self.dummy_rep_token 的一个副本，总共有 src_txt.shape[0] 行
+        # src_txt_dummy = torch.cat([txt_dummy, src_txt], dim=1) # 把dummy token插入到src_txt的前面
+        src_txt_dummy = src_txt # delete dummy
 
-        pos_dummy = self.dummy_rep_pos.reshape([1, self.args.num_dummies, self.hidden_dim]).repeat(pos_txt.shape[0], 1, 1)
-        pos_txt_dummy = torch.cat([pos_dummy, pos_txt], dim=1)
-        src_txt_dummy = src_txt_dummy.permute(1, 0, 2)  # (L, batch_size, d)
+
+        mask_txt = torch.tensor([[True] * self.args.num_dummies]).to(src_txt_mask.device).repeat(src_txt_mask.shape[0], 1) # [32,45] 初始dummy的mask
+        # src_txt_mask_dummy = torch.cat([mask_txt, src_txt_mask], dim=1) # [32,68] 把dummy的mask插入到src_txt_mask的前面
+        src_txt_mask_dummy = src_txt_mask # delete dummy之后的mask
+
+        pos_dummy = self.dummy_rep_pos.reshape([1, self.args.num_dummies, self.hidden_dim]).repeat(pos_txt.shape[0], 1, 1) # [32,45,256]创建一个新的张量 pos_dummy，它的每一行都是 self.dummy_rep_pos 的一个副本，总共有 pos_txt.shape[0] 行
+        # pos_txt_dummy = torch.cat([pos_dummy, pos_txt], dim=1) # [32,68,256] 把dummy的pos插入到pos_txt的前面
+        pos_txt_dummy = pos_txt # [32,23,256] delete dummy之后的pos
+        # src_txt_dummy = src_txt_dummy.permute(1, 0, 2)  # (L, batch_size, d)
         pos_txt_dummy = pos_txt_dummy.permute(1, 0, 2)   # (L, batch_size, d)
 
-        memory = self.txtproj_encoder(src_txt_dummy, src_key_padding_mask=~(src_txt_mask_dummy.bool()), pos=pos_txt_dummy)  # (L, batch_size, d)
-        dummy_token = memory[:self.args.num_dummies].permute(1, 0, 2)
-        pos_txt_dummy = pos_txt_dummy.permute(1, 0, 2)  # (L, batch_size, d)
+        # memory = self.txtproj_encoder(src_txt_dummy, src_key_padding_mask=~(src_txt_mask_dummy.bool()), pos=pos_txt_dummy)  # (L, batch_size, d) Sec. 3.2 Dummy Encoder 的输出
+        # dummy_token = memory[:self.args.num_dummies].permute(1, 0, 2) # Sec. 3.2 Dummy Encoder 的输出截取出的dummy token
+        dummy_token = torch.zeros(src_txt.shape[0], self.args.num_dummies, self.hidden_dim).to(src_txt.device) # fake dummy[32,45,256]
+        pos_txt_dummy = pos_txt_dummy.permute(1, 0, 2)  # (batch_size, L, d) 还原pos_txt_dummy的形状
 
-        src_txt_dummy = torch.cat([dummy_token, src_txt], dim=1)
-        mask_txt_dummy = torch.tensor([[True]*self.args.num_dummies]).to(src_txt_mask.device).repeat(src_txt_mask.shape[0], 1)
-        src_txt_mask_dummy = torch.cat([mask_txt_dummy, src_txt_mask], dim=1)
+        # src_txt_dummy = torch.cat([dummy_token, src_txt], dim=1) # torch.Size([32, 68, 256])
+        mask_txt_dummy = torch.tensor([[True] * self.args.num_dummies]).to(src_txt_mask.device).repeat(src_txt_mask.shape[0], 1) # [32,45] 3.2encoder之后的dummy的mask
+        # src_txt_mask_dummy = torch.cat([mask_txt_dummy, src_txt_mask], dim=1)
+        src_txt_mask_dummy = src_txt_mask
 
-        # Input : Concat video, dummy, txt
+        # Sec. 3.2 Adaptive Cross-Attention 的 Input : Concat video, dummy, txt
         src = torch.cat([src_vid, src_txt_dummy], dim=1)  # (bsz, L_vid+L_txt, d)
         mask = torch.cat([src_vid_mask, src_txt_mask_dummy], dim=1).bool()  # (bsz, L_vid+L_txt)
-        pos = torch.cat([pos_vid, pos_txt_dummy], dim=1)
+        pos = torch.cat([pos_vid, pos_txt_dummy], dim=1) # torch.Size([32, 143, 256])
+        # src = src_vid 
+        # mask = src_vid_mask.bool()  
+        # pos = pos_vid 
 
-        #### for moment token ####
-        moment2txt_similarity = None
-        nmoment2txt_similarity = None
-        moment_mask_ = None
 
-        ### sentence token
-        smask_ = torch.tensor([[True]]).to(mask.device).repeat(src_txt_mask.shape[0], 1)
-        smask = torch.cat([smask_, src_txt_mask.bool()], dim=1)
-        ssrc_ = self.sent_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_txt.shape[0], 1, 1)
-        ssrc = torch.cat([ssrc_, src_txt], dim=1)
-        spos_ = self.sent_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_txt.shape[0], 1, 1)
-        spos = torch.cat([spos_, pos_txt], dim=1)
-        ### dummy sentence token
-        smaskd = torch.cat([smask_, mask_txt_dummy.bool()], dim=1)
-        ssrcd = torch.cat([ssrc_, dummy_token], dim=1)
-        sposd = torch.cat([spos_, pos_dummy], dim=1)
 
-        if targets is not None: # train
-            mmask_ = torch.tensor([[True]]).to(mask.device).repeat(src_vid_mask.shape[0], 1)
-            mmask = torch.cat([mmask_, src_vid_mask.bool()], dim=1)
-            moment_mask_ = torch.clamp(targets["relevant_clips"], 0, 1).bool()
-            moment_mask = torch.cat([mmask_, moment_mask_], dim=1)
-            mmask = mmask * moment_mask
 
-            msrc_ = self.moment_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_vid.shape[0], 1, 1)
-            msrc = torch.cat([msrc_, src_vid], dim=1)
-            mpos_ = self.moment_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_vid.shape[0], 1, 1)
-            mpos = torch.cat([mpos_, pos_vid], dim=1)
+        # ### sentence token 见Figure 4 Sec. 3.3 figure 4 (a)
+        # smask_ = torch.tensor([[True]]).to(mask.device).repeat(src_txt_mask.shape[0], 1) # sentence token mask [32,1]
+        # smask = torch.cat([smask_, src_txt_mask.bool()], dim=1) # [32,1+23] 把sentence token的mask插入到src_txt_mask的前面
+        # ssrc_ = self.sent_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_txt.shape[0], 1, 1) # sentence token [32,1,256]
+        # ssrc = torch.cat([ssrc_, src_txt], dim=1) # [32,24,256] 把sentence token插入到src_txt的前面
+        # spos_ = self.sent_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_txt.shape[0], 1, 1)  # sentence token pos embeding [32,1,256]
+        # spos = torch.cat([spos_, pos_txt], dim=1) # [32,24,256] 把sentence token的pos插入到pos_txt的pos前面
+        # ### dummy sentence token 见Figure 4
+        # smaskd = torch.cat([smask_, mask_txt_dummy.bool()], dim=1) # [32,1+45] 把sentence token的mask插入到dummy的mask的前面
+        # ssrcd = torch.cat([ssrc_, dummy_token], dim=1) # [32,1+45,256] 把sentence token插入到dummy token的前面
+        # sposd = torch.cat([spos_, pos_dummy], dim=1) # [32,1+45,256] 把sentence token的pos插入到dummy token的pos的前面
+
+        if targets is not None: # train 只有训练阶段需要计算moment2txt_similarity和nmoment2txt_similarity 即Sec. 3.3
+            ### for moment token #### Sec. 3.3 figure 4 (a)
+            ### src_vid_mask和moment_mask_的区别？前者代表视频长度的表达，因为都填充到了75，所以有些短一些的视频tensor的第二维后面用0填充了，后者表示与视频中与query相关的片段的mask 这里相乘的目的是什么？ 
+            mmask_ = torch.tensor([[True]]).to(mask.device).repeat(src_vid_mask.shape[0], 1) # moment token mask [32,1] Moment Token代表与query相关的片段的单个token
+            mmask = torch.cat([mmask_, src_vid_mask.bool()], dim=1) # [32,1+75] 把moment token的mask插入到src_vid_mask的前面
+            moment_mask_ = torch.clamp(targets["relevant_clips"], 0, 1).bool() # [32,75] 1代表有moment. 创建一个新的布尔张量 moment_mask_，它的每个元素都是 targets["relevant_clips"] 中对应元素夹紧在 0 和 1 之间后的布尔值,即找出了与query相关的片段，相应的clip标记为1
+            moment_mask = torch.cat([mmask_, moment_mask_], dim=1) # [32,1+75] 把moment token的mask插入到moment_mask_的前面
+            mmask = mmask * moment_mask # [32,76] 逐元素相乘，只有视频长度以内且与query相关的mask是1，其他的mask是0
+
+            msrc_ = self.moment_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_vid.shape[0], 1, 1) # torch.Size([32, 1, 256]) 单独moment token的token
+            msrc = torch.cat([msrc_, src_vid], dim=1) # torch.Size([32, 76, 256]) 把moment token插入到src_vid的前面
+            mpos_ = self.moment_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_vid.shape[0], 1, 1) # torch.Size([32, 1, 256]) 单独moment token的pos
+            mpos = torch.cat([mpos_, pos_vid], dim=1) # torch.Size([32, 76, 256]) 把moment token的pos插入到vid的pos前面
 
 
             ### for Not moment token ####
-            nmmask_ = torch.tensor([[True]]).to(mask.device).repeat(src_vid_mask.shape[0], 1)
+            nmmask_ = torch.tensor([[True]]).to(mask.device).repeat(src_vid_mask.shape[0], 1) # not moment mask
             nmmask = torch.cat([nmmask_, src_vid_mask.bool()], dim=1)
-            nmoment_mask_ = ~(torch.clamp(targets["relevant_clips"], 0, 1).bool())
+            nmoment_mask_ = ~(torch.clamp(targets["relevant_clips"], 0, 1).bool()) # 1代表没有moment 与上面的moment_mask_相反
             nmoment_mask = torch.cat([nmmask_, nmoment_mask_], dim=1)
-            nmmask = nmmask * nmoment_mask
+            nmmask = nmmask * nmoment_mask # 逐元素相乘，只有视频长度以内且与query不相关的mask是1，其他的mask是0
 
-            nmsrc_ = self.moment_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_vid.shape[0], 1, 1)
-            nmsrc = torch.cat([nmsrc_, src_vid], dim=1)
-            nmpos_ = self.moment_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_vid.shape[0], 1, 1)
+            nmsrc_ = self.moment_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_vid.shape[0], 1, 1) # [32,1,256]
+            nmsrc = torch.cat([nmsrc_, src_vid], dim=1) # [32,1+75,256] 跟上面的msrc一样，只是这里是叫not moment token
+            nmpos_ = self.moment_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_vid.shape[0], 1, 1) # [32,1,256]
             nmpos = torch.cat([nmpos_, pos_vid], dim=1)
-            ###########
+            ########### 上面四行代码为什么要重复前面的moment token的操作？为什么不直接用msrc和mpos？已检查，这里的msrc和mpos与前面的是一样的，所以可以直接用msrc和mpos代替nmsrc和nmpos
+        else:
+            moment_mask_ = None
 
         # for t2vidavg sal token
-        vidsrc_ = torch.zeros((len(src_vid), 1, self.hidden_dim)).cuda()
+        vidsrc_ = torch.zeros((len(src_vid), 1, self.hidden_dim)).cuda() # [32,1,256]
         for i in range(len(src_vid)):
-            vidsrc_[i] = src_vid[i][:src_vid_mask.sum(1)[i].long()].mean(0).clone().detach()
+            vidsrc_[i] = src_vid[i][:src_vid_mask.sum(1)[i].long()].mean(0).clone().detach() # [32,1,256] 用视频的均值作为sal token (计算有效元素的均值，然后将结果存储在 vidsrc_ 的第 i 个元素)
 
-        video_length = src_vid.shape[1]
+        video_length = src_vid.shape[1] # 75
         if targets is not None: ## train
-            ssrc = ssrc.permute(1, 0, 2)  # (L, batch_size, d)
-            spos = spos.permute(1, 0, 2)  # (L, batch_size, d)
-            smemory = self.scls_encoder(ssrc, src_key_padding_mask=~smask, pos=spos)  # (L, batch_size, d)
-            # print(smemory[0].shape, smemory[:self.args.num_dummies].shape) # 32 256, 3 32 256
-            # exit(1)
-            sentence_txt, smemory_words = smemory[0], smemory[1:]
+            # # Sec. 3.3 Figure 4 (a) sentence encoder
+            # ssrc = ssrc.permute(1, 0, 2)  # (L, batch_size, d)
+            # spos = spos.permute(1, 0, 2)  # (L, batch_size, d)
+            # smemory = self.scls_encoder(ssrc, src_key_padding_mask=~smask, pos=spos)  # (L, batch_size, d)
+            # sentence_txt, smemory_words = smemory[0], smemory[1:] # sentence_txt : (batch_size, d) 对应图中的S1+, smemory_words: torch.Size([26(可变), 32, 256])
 
-            ssrcd = ssrcd.permute(1, 0, 2)  # (L, batch_size, d)
-            sposd = sposd.permute(1, 0, 2)  # (L, batch_size, d)
-            smemoryd = self.scls_encoder(ssrcd, src_key_padding_mask=~smaskd, pos=sposd)  # (L, batch_size, d)
-            sentence_dummy, smemory_words_dummy = smemoryd[0], smemoryd[1:]
+            # # Sec. 3.3 Figure 4 (a) sentence encoder for dummy
+            # ssrcd = ssrcd.permute(1, 0, 2)  # (L, batch_size, d)
+            # sposd = sposd.permute(1, 0, 2)  # (L, batch_size, d)
+            # smemoryd = self.scls_encoder(ssrcd, src_key_padding_mask=~smaskd, pos=sposd)  # (L, batch_size, d)
+            # sentence_dummy, smemory_words_dummy = smemoryd[0], smemoryd[1:] # sentence_dummy : (batch_size, d)(32,256) 对应图中的S1-, smemory_words_dummy: torch.Size([45, 32, 256])
 
-            txt_dummy_proj = torch.cat([smemory_words_dummy, smemory_words], dim=0)
-
+            # txt_dummy_proj = torch.cat([smemory_words_dummy, smemory_words], dim=0) # 把sentence和dummy的prototype concat到一起，用于计算moment2txt_similarity和nmoment2txt_similarity 
 
             hs, reference, memory, memory_global, attn_weights, memory_moment, nmmemory_moment, mmemory_frames, nmmemory_frames = self.transformer(src, ~mask, self.query_embed.weight, pos, video_length=video_length, moment_idx=targets["relevant_clips"], msrc=msrc, mpos=mpos, mmask=~mmask, nmsrc=nmsrc, nmpos=nmpos, nmmask=~nmmask,
                                                                                                                   ctxtoken=vidsrc_, gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask.sum(1).long())
-            moment2txt_similarity = torch.matmul(mmemory_frames.permute(1, 0, 2), txt_dummy_proj.permute(1, 2, 0))
-            nmoment2txt_similarity = torch.matmul(nmmemory_frames.permute(1, 0, 2), txt_dummy_proj.permute(1, 2, 0))
+            # moment2txt_similarity = torch.matmul(mmemory_frames.permute(1, 0, 2), txt_dummy_proj.permute(1, 2, 0)) # Figure 4 (b) 用于计算moment2txt_similarity
+            # nmoment2txt_similarity = torch.matmul(nmmemory_frames.permute(1, 0, 2), txt_dummy_proj.permute(1, 2, 0))
+            sentence_dummy, sentence_txt, moment2txt_similarity, nmoment2txt_similarity = None, None, None, None
         else: ## inference
-            sentence_dummy, sentence_txt = None, None
+            sentence_dummy, sentence_txt, moment2txt_similarity, nmoment2txt_similarity = None, None, None, None
             hs, reference, memory, memory_global, attn_weights, memory_moment, nmmemory_moment, mmemory_frames, nmmemory_frames = self.transformer(src, ~mask, self.query_embed.weight, pos, video_length=video_length,
                                                                                                                   ctxtoken=vidsrc_, gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask.sum(1).long())
-        outputs_class = self.class_embed(hs)  # (#layers, batch_size, #queries, #classes)
-        reference_before_sigmoid = inverse_sigmoid(reference)
-        tmp = self.span_embed(hs)
+        outputs_class = self.class_embed(hs)  # (#layers, batch_size, #queries, #classes) [3, 32, 10, 2] 将隐藏层的输出hs输入到全连接层中，得到输出outputs_class
+        reference_before_sigmoid = inverse_sigmoid(reference) # (#layers, batch_size, #queries, 2) [3, 32, 10, 2] 将reference的输出输入到inverse_sigmoid中，得到输出reference_before_sigmoid
+        tmp = self.span_embed(hs) # (#layers, batch_size, #queries, 2) [3, 32, 10, 2] 将隐藏层的输出hs输入到全连接层中，得到输出tmp
         outputs_coord = tmp + reference_before_sigmoid
         if self.span_loss_type == "l1":
             outputs_coord = outputs_coord.sigmoid()
-        out = {'pred_logits': outputs_class[-1], 'pred_spans': outputs_coord[-1]}
+        out = {'pred_logits': outputs_class[-1], 'pred_spans': outputs_coord[-1]} # 只取最后一层的输出
 
-        txt_mem = memory[:, src_vid.shape[1]:]  # (bsz, L_txt, d)
-        vid_mem = memory[:, :src_vid.shape[1]]  # (bsz, L_vid, d)
+        txt_mem = memory[:, src_vid.shape[1]:]  # (bsz, L_txt, d) [32, 0, 256]
+        vid_mem = memory[:, :src_vid.shape[1]]  # (bsz, L_vid, d) [32, 75, 256]
         if self.contrastive_align_loss:
             proj_queries = F.normalize(self.contrastive_align_projection_query(hs), p=2, dim=-1)
             proj_txt_mem = F.normalize(self.contrastive_align_projection_txt(txt_mem), p=2, dim=-1)
@@ -282,63 +311,61 @@ class CGDETR(nn.Module):
                 proj_vid_mem=proj_vid_mem
             ))
 
-        ### Neg Pairs ###
-        neg_vid = ori_vid[1:] + ori_vid[:1]
-        real_neg_mask = torch.Tensor(element_wise_list_equal(ori_vid, neg_vid)).to(src_txt_dummy.device)
-        real_neg_mask = real_neg_mask == False
-        if real_neg_mask.sum() != 0:
+        if vid is not None: ## for demo (run_on_video/run.py)
+            ### Neg Pairs ###
+            neg_vid = ori_vid[1:] + ori_vid[:1] #将 ori_vid 列表的第一个元素移动到最后一个位置
+            real_neg_mask = torch.Tensor(element_wise_list_equal(ori_vid, neg_vid)).to(src_txt_dummy.device)
+            real_neg_mask = real_neg_mask == False
+            if real_neg_mask.sum() != 0:
 
-            src_txt_dummy_neg = torch.cat([src_txt_dummy[1:], src_txt_dummy[0:1]], dim=0)
-            src_txt_mask_dummy_neg = torch.cat([src_txt_mask_dummy[1:], src_txt_mask_dummy[0:1]], dim=0)
-            src_dummy_neg = torch.cat([src_vid, src_txt_dummy_neg], dim=1)
-            mask_dummy_neg = torch.cat([src_vid_mask, src_txt_mask_dummy_neg], dim=1).bool()
+                src_txt_dummy_neg = torch.cat([src_txt_dummy[1:], src_txt_dummy[0:1]], dim=0)
+                src_txt_mask_dummy_neg = torch.cat([src_txt_mask_dummy[1:], src_txt_mask_dummy[0:1]], dim=0)
+                src_dummy_neg = torch.cat([src_vid, src_txt_dummy_neg], dim=1)
+                mask_dummy_neg = torch.cat([src_vid_mask, src_txt_mask_dummy_neg], dim=1).bool()
+                pos_neg = pos.clone()  # since it does not use actual content
 
-            pos_neg = pos.clone()  # since it does not use actual content
+                mask_dummy_neg = mask_dummy_neg[real_neg_mask] # 挑选出neg mask中为True的位置 [32, 143]
+                src_dummy_neg = src_dummy_neg[real_neg_mask] # [32, 143, 256]
+                pos_neg = pos_neg[real_neg_mask]
+                src_txt_mask_dummy_neg = src_txt_mask_dummy_neg[real_neg_mask]
 
-            # src_txt_neg = src_txt_dummy_neg[:, 1:]
-            # src_txt_mask_neg = src_txt_mask_dummy_neg[:, 1:]
+                _, _, memory_neg, memory_global_neg, attn_weights_neg, _, _, _, _ = self.transformer(src_dummy_neg, ~mask_dummy_neg, self.query_embed.weight, pos_neg, video_length=video_length,
+                                                                                               ctxtoken=vidsrc_[real_neg_mask], gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask[real_neg_mask].sum(1).long())
+                vid_mem_neg = memory_neg[:, :src_vid.shape[1]] # (bsz, L_vid, d)
+                out["saliency_scores_neg"] = (torch.sum(self.saliency_proj1(vid_mem_neg) * self.saliency_proj2(memory_global_neg).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim))
+                out["src_txt_mask_neg"] = src_txt_mask_dummy_neg
 
-            mask_dummy_neg = mask_dummy_neg[real_neg_mask]
-            src_dummy_neg = src_dummy_neg[real_neg_mask]
-            pos_neg = pos_neg[real_neg_mask]
-            # src_txt_neg = src_txt_neg[real_neg_mask]
-            # src_txt_mask_neg = src_txt_mask_neg[real_neg_mask]
-            src_txt_mask_dummy_neg = src_txt_mask_dummy_neg[real_neg_mask]
-
-
-            _, _, memory_neg, memory_global_neg, attn_weights_neg, _, _, _, _ = self.transformer(src_dummy_neg, ~mask_dummy_neg, self.query_embed.weight, pos_neg, video_length=video_length,
-                                                                                           ctxtoken=vidsrc_[real_neg_mask], gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask[real_neg_mask].sum(1).long())
-            vid_mem_neg = memory_neg[:, :src_vid.shape[1]]
-            out["saliency_scores_neg"] = (torch.sum(self.saliency_proj1(vid_mem_neg) * self.saliency_proj2(memory_global_neg).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim))
-            out["src_txt_mask_neg"] = src_txt_mask_dummy_neg
-
-            out["t2vattnvalues_neg"] = (attn_weights_neg[:, :, self.args.num_dummies:] * (src_txt_mask_dummy_neg[:, self.args.num_dummies:].unsqueeze(1).repeat(1, video_length, 1))).sum(2)
-            out["t2vattnvalues_neg"] = torch.clamp(out["t2vattnvalues_neg"], 0, 1)
+                out["t2vattnvalues_neg"] = (attn_weights_neg[:, :, self.args.num_dummies:] * (src_txt_mask_dummy_neg[:, self.args.num_dummies:].unsqueeze(1).repeat(1, video_length, 1))).sum(2)
+                out["t2vattnvalues_neg"] = torch.clamp(out["t2vattnvalues_neg"], 0, 1) # [32, 75]
+                # out["t2vattnvalues_neg"] = None
+            else:
+                out["saliency_scores_neg"] = None
+                out["t2vattnvalues_neg"] = None
+            out["real_neg_mask"] = real_neg_mask
         else:
             out["saliency_scores_neg"] = None
             out["t2vattnvalues_neg"] = None
+            out["real_neg_mask"] = None
 
 
-        out["saliency_scores"] = (torch.sum(self.saliency_proj1(vid_mem) * self.saliency_proj2(memory_global).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim))
-
+        out["saliency_scores"] = (torch.sum(self.saliency_proj1(vid_mem) * self.saliency_proj2(memory_global).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim)) # [32, 75, 256] * [32, 256] / sqrt(256) -> [32, 75]
         out["memory_moment"] = memory_moment
         out["nmmemory_moment"] = nmmemory_moment
 
         ## sentence token embeeded with text / dummy
         out["sentence_txt"] = sentence_txt
         out["sentence_dummy"] = sentence_dummy
-
         out["moment2txt_similarity"] = moment2txt_similarity
         out["nmoment2txt_similarity"] = nmoment2txt_similarity
         out["cate_attn_weights"] = attn_weights
         out["moment_mask"] = moment_mask_
         out["txt_mask"] = src_txt_mask_dummy
 
-        out["real_neg_mask"] = real_neg_mask
 
-        out["t2vattnvalues"] = (attn_weights[:,:,self.args.num_dummies:] * (src_txt_mask.unsqueeze(1).repeat(1, video_length, 1))).sum(2) # 32 75 (24) / 32 (24)
+        out["t2vattnvalues"] = (attn_weights[:,:,self.args.num_dummies:] * (src_txt_mask.unsqueeze(1).repeat(1, video_length, 1))).sum(2) # (batch_size, L_vid, L_txt) / (batch_size, L_txt)
+        # out["t2vattnvalues"] = (attn_weights[:, :, self.args.num_dummies:] * (src_txt_mask_dummy[:, self.args.num_dummies:].unsqueeze(1).repeat(1, video_length, 1))).sum(2) # (batch_size, L_vid, L_txt) / (batch_size, L_txt)
         out["t2vattnvalues"] = torch.clamp(out["t2vattnvalues"], 0, 1)
-        out["dummy_tokens"] = dummy_token
+        # out["dummy_tokens"] = dummy_token
         out["global_rep_tokens"] = self.global_rep_token
 
 
@@ -357,6 +384,69 @@ class CGDETR(nn.Module):
                 for idx, d in enumerate(proj_queries[:-1]):
                     out['aux_outputs'][idx].update(dict(proj_queries=d, proj_txt_mem=proj_txt_mem))
         return out
+
+
+class SAMMIMIC(nn.Module):
+    def __init__(self, transformer, position_embed, txt_position_embed, txt_dim, vid_dim,
+                 num_queries, input_dropout, aux_loss=False,
+                 contrastive_align_loss=False, contrastive_hdim=64,
+                 max_v_l=75, span_loss_type="l1", use_txt_pos=False, n_input_proj=2, aud_dim=0, args=None):        
+        super().__init__()
+        self.transformer = transformer
+        self.num_queries = num_queries
+        self.position_embed = position_embed
+        self.txt_position_embed = txt_position_embed
+        self.txt_dim = txt_dim
+        self.vid_dim = vid_dim
+        hidden_dim = transformer.d_model
+        self.aux_loss = aux_loss
+        normalize_before = False
+        self.contrastive_align_loss = contrastive_align_loss
+        self.contrastive_hdim = contrastive_hdim
+        self.max_v_l = max_v_l
+        self.span_loss_type = span_loss_type
+        self.use_txt_pos = use_txt_pos
+        self.n_input_proj = n_input_proj
+        self.aud_dim = aud_dim
+        self.args = args
+
+        # Video Transformer Encoder
+        self.video_encoder_layer = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu") #TODO
+        self.video_encoder = TransformerEncoder(self.video_encoder_layer, num_layers=args.num_encoder_layers)
+
+        # Text Transformer Encoder
+        self.text_encoder_layer = TransformerEncoderLayer(hidden_dim, 8, self.args.dim_feedforward, 0.1, "prelu")
+        self.text_encoder = TransformerEncoder(self.text_encoder_layer, num_layers=args.num_encoder_layers)
+
+        # Transformer Decoder
+        self.decoder_layer = TransformerDecoderLayer(d_model=256, nhead=2, dropout=args.dropout)
+        self.decoder = TransformerDecoder(self.decoder_layer, num_layers=3)
+
+        # Project video and text input to the same hidden dimension
+        self.video_input_proj = nn.Linear(vid_dim, hidden_dim)
+        self.text_input_proj = nn.Linear(txt_dim, hidden_dim)
+
+    def forward(self, src_txt, src_txt_mask, src_vid, src_vid_mask, vid, qid, src_aud=None, src_aud_mask=None, targets=None):
+        # Project inputswo tensors:
+        src_vid = self.video_input_proj(src_vid) # bsz, L_vid, d torch.Size([32, 75, 2306]) -> torch.Size([32, 75, 256])
+        src_txt = self.text_input_proj(src_txt) # bsz, L_txt, d torch.Size([32, 25, 512]) -> torch.Size([32, 25, 256])
+
+        # Add position embeddings
+        # src_vid = src_vid + self.position_embed(src_vid_mask)
+        # src_txt = src_txt + self.txt_position_embed(src_txt_mask)
+        pos_vid = self.position_embed(src_vid, src_vid_mask) # (bsz, L_vid, d) mask: (bsz, L_vid)(32,75) pos: (bsz, L_vid, d) torch.Size([32, 75, 256])
+        pos_txt = self.txt_position_embed(src_txt) if self.use_txt_pos else torch.zeros_like(src_txt)  # (bsz, L_txt, d) torch.Size([32, 25, 256])
+
+        # Pass through the encoders
+        video_memory = self.video_encoder(pos_vid) # (bsz, L_vid, d) torch.Size([32, 75, 256])
+        text_memory = self.text_encoder(pos_txt) # 形状[32, 25, 256]
+
+        print("text_memory shape:", text_memory.shape)
+        print("video_memory shape:", video_memory.shape)
+        
+        # Decoder (cross attention between text query and video key/value)
+        output = self.decoder(tgt=text_memory.permute(1,0,2), memory=video_memory.permute(1,0,2))
+        return output
 
 class SetCriterion(nn.Module):
     """ This class computes the loss for DETR.
@@ -455,10 +545,8 @@ class SetCriterion(nn.Module):
         if "saliency_pos_labels" not in targets:
             return {"loss_saliency": 0}
 
-
-
         # Neg pair loss
-        if outputs["saliency_scores_neg"] is not None:
+        if outputs["saliency_scores_neg"] is not None: ## When batch size is not 1 (negative pair exists)
             vid_token_mask = outputs["video_mask"]
             real_neg_mask = outputs["real_neg_mask"]
             saliency_scores_neg = outputs["saliency_scores_neg"].clone()  # (N, L)
@@ -467,7 +555,7 @@ class SetCriterion(nn.Module):
             saliency_scores = outputs["saliency_scores"].clone()  # (N, L)
             saliency_contrast_label = targets["saliency_all_labels"]
 
-            # real neg / false neg 나눠서 contrastive 진
+            # real neg
             realneg_saliency_scores = torch.cat([saliency_scores[real_neg_mask], saliency_scores_neg], dim=1)
             realneg_saliency_contrast_label = torch.cat([saliency_contrast_label[real_neg_mask], torch.zeros_like(saliency_contrast_label)[real_neg_mask]], dim=1)
             realneg_vid_token_mask = vid_token_mask[real_neg_mask].repeat([1, 2])
@@ -497,7 +585,6 @@ class SetCriterion(nn.Module):
             loss_rank_contrastive = loss_rank_contrastive / 12
 
             false_neg_mask = ~(real_neg_mask)
-            # print(false_neg_mask, saliency_contrast_label.shape, saliency_scores.shape, vid_token_mask.shape)
             if false_neg_mask.sum() != 0:
                 if false_neg_mask.sum() == 1:
                     falseneg_saliency_scores = saliency_scores[false_neg_mask].unsqueeze(0)
@@ -563,7 +650,7 @@ class SetCriterion(nn.Module):
             saliency_scores = outputs["t2vattnvalues"].clone()  # (N, L)
             saliency_contrast_label = targets["saliency_all_labels"]
 
-            # real neg / false neg 나눠서 contrastive 진
+            # real neg
             realneg_saliency_scores = torch.cat([saliency_scores[real_neg_mask], saliency_scores_neg], dim=1)
             realneg_saliency_contrast_label = torch.cat(
                 [saliency_contrast_label[real_neg_mask], torch.zeros_like(saliency_contrast_label)[real_neg_mask]], dim=1)
@@ -595,7 +682,6 @@ class SetCriterion(nn.Module):
             loss_rank_contrastive_attn = loss_rank_contrastive_attn / 12
 
             false_neg_mask = ~(real_neg_mask)
-            # print(false_neg_mask, saliency_contrast_label.shape, saliency_scores.shape, vid_token_mask.shape)
             if false_neg_mask.sum() != 0:
                 if false_neg_mask.sum() == 1:
                     falseneg_saliency_scores = saliency_scores[false_neg_mask].unsqueeze(0)
@@ -645,7 +731,6 @@ class SetCriterion(nn.Module):
                             / (len(pos_scores) * num_pairs) * 2  # * 2 to keep the loss the same scale
 
             saliency_binary_label = torch.clamp(targets["saliency_all_labels"], 0, 1)
-            # print(saliency_scores.shape, saliency_binary_label.shape)
             logits = saliency_scores.reshape(-1)
             labels_x = saliency_binary_label.reshape(-1)
             BCEcriterion = nn.BCELoss()
@@ -654,7 +739,8 @@ class SetCriterion(nn.Module):
             if self.args.dset_name in ['youtube_uni']:
                 loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_neg_pair_attn * 0 + loss_saliency_attn
             else:
-                loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_neg_pair_attn + loss_saliency_attn
+                loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_saliency_attn
+                # loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_neg_pair_attn + loss_saliency_attn
             loss_saliency += (loss_saliency_attn * self.args.lw_wattn)
             
         else: ## when batch size == 1
@@ -743,17 +829,15 @@ class SetCriterion(nn.Module):
             loss_saliency_attn = torch.clamp(self.saliency_margin + neg_scores - pos_scores, min=0).sum() \
                             / (len(pos_scores) * num_pairs) * 2  # * 2 to keep the loss the same scale
             saliency_binary_label = torch.clamp(targets["saliency_all_labels"], 0, 1)
-            # print(saliency_scores.shape, saliency_binary_label.shape)
             logits = saliency_scores.reshape(-1)
             labels_x = saliency_binary_label.reshape(-1)
             BCEcriterion = nn.BCELoss()
             bceloss = BCEcriterion(logits, labels_x)
 
-            loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_saliency_attn
+            loss_saliency_attn = loss_rank_contrastive_attn + bceloss + loss_saliency_attn # 分别对应文章中的L_{rctl}, L_{bce}, L_{saliency}
             loss_saliency += (loss_saliency_attn * self.args.lw_wattn)
         return {"loss_saliency": loss_saliency}
 
-    # TODO
     def loss_contrastive_moment_sentence(self, outputs, targets, indices, log=True):
         if outputs["memory_moment"] is not None:
             moment_token = outputs["memory_moment"]
@@ -784,13 +868,11 @@ class SetCriterion(nn.Module):
 
             dummy_loss_ms_align = self.criterion(dummy_similarity_matrix, dummy_labels)
             loss_ms_align += dummy_loss_ms_align
-
-
             video_mask = outputs['video_mask']
-            src_vid = outputs['src_vid']  # [batch_size, L_vid, D_vid]
+            src_vid = outputs['src_vid']  # [bsz, L_vid, D_vid]
             moment_mask_ = torch.clamp(targets["relevant_clips"], 0, 1)
 
-            momtokcls_pred = torch.matmul(moment_token.unsqueeze(1), src_vid.permute(0, 2, 1))  # b 1 L_vid
+            momtokcls_pred = torch.matmul(moment_token.unsqueeze(1), src_vid.permute(0, 2, 1))  # bsz 1 L_vid
             momtokcls_label = moment_mask_
             momtokcls_logit = torch.sigmoid(momtokcls_pred)
             loss_ms_align += (self.bce_criterion(momtokcls_logit.reshape(-1), momtokcls_label.reshape(-1)) * video_mask.reshape(-1)).mean()
@@ -802,12 +884,11 @@ class SetCriterion(nn.Module):
 
     def loss_moment2txt_sim_distill(self, outputs, targets, indices, log=True):
         if outputs["moment2txt_similarity"] is not None:
-            moment2txt_similarity = outputs["moment2txt_similarity"]  # 32 75 22
-            nmoment2txt_similarity = outputs["nmoment2txt_similarity"]  # 32 75 22
-            moment_mask = outputs["moment_mask"].int() # 32 75 1
-            txt_mask = outputs["txt_mask"].unsqueeze(1).repeat(1, outputs["cate_attn_weights"].size(1), 1)  # b l_t
+            moment2txt_similarity = outputs["moment2txt_similarity"]  # bsz L_clip 22
+            moment_mask = outputs["moment_mask"].int() # bsz L_clip 1
+            txt_mask = outputs["txt_mask"].unsqueeze(1).repeat(1, outputs["cate_attn_weights"].size(1), 1)  # bsz l_t
 
-            attn_weights = outputs["cate_attn_weights"] # 32 75 22
+            attn_weights = outputs["cate_attn_weights"] # bsz L_clip 22
             b, L_vid, L_txt = attn_weights.size()
             loss_distill = self.kld_criterion(
                 torch.log(attn_weights + 1e-6).reshape(b * L_vid, -1),
@@ -859,8 +940,6 @@ class SetCriterion(nn.Module):
 
     def loss_contrastive_align_vid_txt(self, outputs, targets, indices, log=True):
         """encourage higher scores between matched query span and input text"""
-        # TODO (1)  align vid_mem and txt_mem;
-        # TODO (2) change L1 loss as CE loss on 75 labels, similar to soft token prediction in MDETR
         normalized_text_embed = outputs["proj_txt_mem"]  # (bsz, #tokens, d)  text tokens
         normalized_img_embed = outputs["proj_queries"]  # (bsz, #queries, d)
         logits = torch.einsum(
@@ -925,7 +1004,6 @@ class SetCriterion(nn.Module):
 
         # Compute all the requested losses
         losses = {}
-        # for loss in self.losses:
         for loss in losses_target:
             losses.update(self.get_loss(loss, outputs, targets, indices))
 
@@ -939,7 +1017,6 @@ class SetCriterion(nn.Module):
                 else:
                     indices = None
                     losses_target = ["saliency", "ms_align", "distill", "orthogonal_dummy"]
-                # for loss in self.losses:
                 for loss in losses_target:
                     if "saliency" == loss:  # skip as it is only in the top layer
                         continue
@@ -957,8 +1034,6 @@ class SetCriterion(nn.Module):
 
 
 class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
-
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
@@ -970,19 +1045,18 @@ class MLP(nn.Module):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
 
-
 class LinearLayer(nn.Module):
     """linear layer configurable with layer normalization, dropout, ReLU."""
 
-    def __init__(self, in_hsz, out_hsz, layer_norm=True, dropout=0.1, relu=True):
+    def __init__(self, input_dim, output_dim, layer_norm=True, dropout=0.1, relu=True):
         super(LinearLayer, self).__init__()
         self.relu = relu
         self.layer_norm = layer_norm
         if layer_norm:
-            self.LayerNorm = nn.LayerNorm(in_hsz)
+            self.LayerNorm = nn.LayerNorm(input_dim)
         layers = [
             nn.Dropout(dropout),
-            nn.Linear(in_hsz, out_hsz)
+            nn.Linear(input_dim, output_dim)
         ]
         self.net = nn.Sequential(*layers)
 
@@ -1002,23 +1076,73 @@ def build_model(args):
     transformer = build_transformer(args)
     position_embedding, txt_position_embedding = build_position_encoding(args)
 
-    model = CGDETR(
-        transformer,
-        position_embedding,
-        txt_position_embedding,
-        txt_dim=args.t_feat_dim,
-        vid_dim=args.v_feat_dim,
-        num_queries=args.num_queries,
-        input_dropout=args.input_dropout,
-        aux_loss=args.aux_loss,
-        contrastive_align_loss=args.contrastive_align_loss,
-        contrastive_hdim=args.contrastive_hdim,
-        span_loss_type=args.span_loss_type,
-        use_txt_pos=args.use_txt_pos,
-        n_input_proj=args.n_input_proj,
-        args=args
-    )
-
+    if args.a_feat_dir is None:
+        model = CGDETR(
+            transformer,
+            position_embedding,
+            txt_position_embedding,
+            txt_dim=args.t_feat_dim,
+            vid_dim=args.v_feat_dim,
+            num_queries=args.num_queries,
+            input_dropout=args.input_dropout,
+            aux_loss=args.aux_loss,
+            contrastive_align_loss=args.contrastive_align_loss,
+            contrastive_hdim=args.contrastive_hdim,
+            span_loss_type=args.span_loss_type,
+            use_txt_pos=args.use_txt_pos,
+            n_input_proj=args.n_input_proj,
+            args=args
+        )
+        # model = SAMMIMIC(
+        #     transformer,
+        #     position_embedding,
+        #     txt_position_embedding,
+        #     txt_dim=args.t_feat_dim,
+        #     vid_dim=args.v_feat_dim,
+        #     num_queries=args.num_queries,
+        #     input_dropout=args.input_dropout,
+        #     aux_loss=args.aux_loss,
+        #     contrastive_align_loss=args.contrastive_align_loss,
+        #     contrastive_hdim=args.contrastive_hdim,
+        #     span_loss_type=args.span_loss_type,
+        #     use_txt_pos=args.use_txt_pos,
+        #     n_input_proj=args.n_input_proj,
+        #     args=args
+        # )
+    else:
+        model = CGDETR(
+            transformer,
+            position_embedding,
+            txt_position_embedding,
+            txt_dim=args.t_feat_dim,
+            vid_dim=args.v_feat_dim,
+            aud_dim=args.a_feat_dim,
+            num_queries=args.num_queries,
+            input_dropout=args.input_dropout,
+            aux_loss=args.aux_loss,
+            contrastive_align_loss=args.contrastive_align_loss,
+            contrastive_hdim=args.contrastive_hdim,
+            span_loss_type=args.span_loss_type,
+            use_txt_pos=args.use_txt_pos,
+            n_input_proj=args.n_input_proj,
+            args=args
+        )
+        # model = SAMMIMIC(
+        #     transformer,
+        #     position_embedding,
+        #     txt_position_embedding,
+        #     txt_dim=args.t_feat_dim,
+        #     vid_dim=args.v_feat_dim,
+        #     num_queries=args.num_queries,
+        #     input_dropout=args.input_dropout,
+        #     aux_loss=args.aux_loss,
+        #     contrastive_align_loss=args.contrastive_align_loss,
+        #     contrastive_hdim=args.contrastive_hdim,
+        #     span_loss_type=args.span_loss_type,
+        #     use_txt_pos=args.use_txt_pos,
+        #     n_input_proj=args.n_input_proj,
+        #     args=args
+        # )
 
     matcher = build_matcher(args)
     weight_dict = {"loss_span": args.span_loss_coef,
@@ -1037,11 +1161,14 @@ def build_model(args):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items() if k != "loss_saliency"})
         weight_dict.update(aux_weight_dict)
 
-    losses = ['spans', 'labels', 'saliency', 'ms_align', 'distill', 'orthogonal_dummy']
+    # losses = ['spans', 'labels', 'saliency', 'ms_align', 'distill', 'orthogonal_dummy']
+    # losses = ['spans', 'labels', 'saliency', 'orthogonal_dummy']
+    losses = ['spans', 'labels', 'saliency']
+
     if args.contrastive_align_loss:
         losses += ["contrastive_align"]
         
-    # For tvsum dataset
+    # For highlight detection datasets
     use_matcher = not (args.dset_name in ['youtube_uni', 'tvsum'])
         
     criterion = SetCriterion(

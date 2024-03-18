@@ -1,5 +1,5 @@
 import torch
-from cg_detr.model import build_transformer, build_position_encoding, CGDETR
+from cg_detr_bak.model import build_transformer, build_position_encoding, CGDETR
 
 
 def build_inference_model(ckpt_path, **kwargs):

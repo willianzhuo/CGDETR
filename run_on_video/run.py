@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from run_on_video.data_utils import ClipFeatureExtractor
 from run_on_video.model_utils import build_inference_model
 from utils.tensor_utils import pad_sequences_1d
-from cg_detr.span_utils import span_cxw_to_xx
+from cg_detr_bak.span_utils import span_cxw_to_xx
 from utils.basic_utils import l2_normalize_np_array
 import torch.nn.functional as F
 import numpy as np

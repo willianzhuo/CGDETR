@@ -6,12 +6,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cg_detr.span_utils import generalized_temporal_iou, span_cxw_to_xx
+from cg_detr_bak.span_utils import generalized_temporal_iou, span_cxw_to_xx
 
-from cg_detr.matcher import build_matcher
-from cg_detr.transformer import build_transformer, TransformerEncoderLayer, TransformerEncoder
-from cg_detr.position_encoding import build_position_encoding
-from cg_detr.misc import accuracy
+from cg_detr_bak.matcher import build_matcher
+from cg_detr_bak.transformer import build_transformer, TransformerEncoderLayer, TransformerEncoder
+from cg_detr_bak.position_encoding import build_position_encoding
+from cg_detr_bak.misc import accuracy
 import numpy as np
 import copy
 

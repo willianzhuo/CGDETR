@@ -13,10 +13,10 @@ import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from cg_detr.config import BaseOptions
-from cg_detr.start_end_dataset import \
+from cg_detr_bak.config import BaseOptions
+from cg_detr_bak.start_end_dataset import \
     StartEndDataset, start_end_collate, prepare_batch_inputs
-from cg_detr.inference import eval_epoch, start_inference, setup_model
+from cg_detr_bak.inference import eval_epoch, start_inference, setup_model
 from utils.basic_utils import AverageMeter, dict_to_markdown
 from utils.model_utils import count_parameters
 
@@ -70,6 +70,13 @@ def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i, tb_writ
         losses.backward()
         if opt.grad_clip > 0:
             nn.utils.clip_grad_norm_(model.parameters(), opt.grad_clip)
+        
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.data.norm()
+                if grad_norm > 1000:  # 设置一个阈值，比如1000
+                    print(f"梯度爆炸警告：{name}的梯度是{grad_norm}")
+
         optimizer.step()
         time_meters["model_backward_time"].update(time.time() - timer_start)
 
