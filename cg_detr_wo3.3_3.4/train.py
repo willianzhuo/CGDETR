@@ -13,10 +13,10 @@ import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from cg_detr.config import BaseOptions
-from cg_detr.start_end_dataset import \
+from cg_detr_wo34.config import BaseOptions
+from cg_detr_wo34.start_end_dataset import \
     StartEndDataset, start_end_collate, prepare_batch_inputs
-from cg_detr.inference import eval_epoch, start_inference, setup_model
+from cg_detr_wo34.inference import eval_epoch, start_inference, setup_model
 from utils.basic_utils import AverageMeter, dict_to_markdown
 from utils.model_utils import count_parameters
 

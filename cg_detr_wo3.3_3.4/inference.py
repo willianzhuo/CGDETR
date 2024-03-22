@@ -10,11 +10,11 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 
-from cg_detr.config import TestOptions
-from cg_detr.model import build_model
-from cg_detr.span_utils import span_cxw_to_xx
-from cg_detr.start_end_dataset import StartEndDataset, start_end_collate, prepare_batch_inputs
-from cg_detr.postprocessing_cg_detr import PostProcessorDETR
+from cg_detr_wo34.config import TestOptions
+from cg_detr_wo34.model import build_model
+from cg_detr_wo34.span_utils import span_cxw_to_xx
+from cg_detr_wo34.start_end_dataset import StartEndDataset, start_end_collate, prepare_batch_inputs
+from cg_detr_wo34.postprocessing_cg_detr import PostProcessorDETR
 from standalone_eval.eval import eval_submission
 from utils.basic_utils import save_jsonl, save_json
 from utils.temporal_nms import temporal_nms

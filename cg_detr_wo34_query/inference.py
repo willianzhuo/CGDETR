@@ -283,16 +283,18 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
                 st, ed = span
                 st = int(st/2)
                 ed = int(ed/2)
-                # if st >= len(valid_vid_token) or ed >= len(valid_vid_token):
-                #     continue
                 if st == ed:
-                    ed += 1
+                    continue
+                if st >= len(valid_vid_token):
+                    continue
+                if ed >= len(valid_vid_token):
+                    ed = len(valid_vid_token) - 1
                 moment_token.append(valid_vid_token[st:ed])
             # 计算每个moment token和query token的cosine相似度
-            moment_token1 = torch.stack([m.mean(dim=0) for m in moment_token]) # [10, 256]
-            # moment_token = moment_token.mean(1) # [10, 256]
-            query_token = query_token.unsqueeze(0).repeat(len(moment_token1), 1)
-            score = F.cosine_similarity(moment_token1, query_token, dim=1)
+            moment_token = torch.stack(moment_token) # [10, 21, 256]
+            moment_token = moment_token.mean(1) # [10, 256]
+            query_token = query_token.unsqueeze(0).repeat(len(moment_token), 1)
+            score = F.cosine_similarity(moment_token, query_token, dim=1)
             score = score.unsqueeze(1) # [10, 1]
             score = score.to(spans.device)
             cur_ranked_preds = torch.cat([spans, score], dim=1).tolist()
@@ -308,7 +310,7 @@ def compute_mr_results(model, eval_loader, opt, epoch_i=None, criterion=None, tb
                 pred_saliency_scores=saliency_scores[idx]
             )
             mr_res.append(cur_query_pred)
-            
+
         if criterion:
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict

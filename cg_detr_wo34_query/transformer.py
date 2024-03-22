@@ -121,81 +121,47 @@ class Transformer(nn.Module):
             vlen: actual video length
         Returns:
         """
-        # moment token
-        if msrc is not None:
-            msrc = msrc.permute(1, 0, 2)  # (L, batch_size, d) (76, 32, 256) Figure 4 (a) moment enceoder的输入
-            mpos = mpos.permute(1, 0, 2)  # (L, batch_size, d)
-            mmemory = self.mcls_encoder(msrc, src_key_padding_mask=mmask, pos=mpos)  # (L, batch_size, d) Sec. 3.3 Figure 4 (a) moment enceoder
-            mmemory_moment, mmemory_frames = mmemory[0], mmemory[1:] # （32，256）（75，32，256）分别为moment token和frame token，即图中的M1+和V1+
-        else:
-            mmemory_moment = None
-            mmemory_frames = None
-        # non-moment token 重复上面的操作
-        if nmsrc is not None:
-            nmsrc = nmsrc.permute(1, 0, 2)  # (L, batch_size, d)
-            nmpos = nmpos.permute(1, 0, 2)  # (L, batch_size, d)
-            nmmemory = self.mcls_encoder(nmsrc, src_key_padding_mask=nmmask, pos=nmpos)  # (L, batch_size, d)
-            nmmemory_moment, nmmemory_frames = nmmemory[0], nmmemory[1:]
-        else:
-            nmmemory_moment = None
-            nmmemory_frames = None
-
         # flatten NxCxHxW to HWxNxC
         bs, l, d = src.shape # torch.Size([32, 143, 256]) 143 = L_vid + L_dummy + L_txt = 75+45+23
         src = src.permute(1, 0, 2)  # (L, batch_size, d)
         pos_embed = pos_embed.permute(1, 0, 2)   # (L, batch_size, d)
-        refpoint_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (#queries, batch_size, d) torch.Size([10, 32, 2])
+        # refpoint_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (#queries, batch_size, d) torch.Size([10, 32, 2])
+        # refpoint_embed = query_embed.unsqueeze(0).repeat(10, 1, 1)  # (#queries, batch_size, d) torch.Size([10, 32, 2])
 
         t2v_src, attn_weights = self.t2v_encoder(src, src_key_padding_mask=mask, pos=pos_embed, video_length=video_length)  # (L, batch_size, d) t2v_src:[143, 32, 256] attn_weights: (32, 75, 68) Sec. 3.2 Figure 2 Adaptive Cross-Attention
+        
+        refpoint_weight = attn_weights[:, :, 45:].sum(dim=1) # (32, 25)
+        ## Opt1. Min-Max weight
+        # 计算每个样本的最小值和最大值
+        min_vals = torch.min(refpoint_weight, dim=1)[0].unsqueeze(1)
+        max_vals = torch.max(refpoint_weight, dim=1)[0].unsqueeze(1)
 
-        # Saliency Token
-        ## Context
-        ctx_src_ = ctxtoken.permute(1, 0, 2) # L b d (1, 32, 256) 每个视频的token均值
+        # 对每个样本内的25个值进行min-max缩放, 再softmax
+        refpoint_weight = (refpoint_weight - min_vals) / (max_vals - min_vals)
+        refpoint_weight = F.softmax(refpoint_weight, dim=1) # (32, 25)
+        # 用refpoint_weight给query_embed第二维度算加权平均
+        # query_embed = torch.mean(query_embed, dim=1) # torch.Size([32, 2]) # 直接求均值
 
-        ## Distribution Token with 10 prompt tokens
-        ### Video Clip featre - context (avg) --> Find top 10 similar tokens --> weighted sum   Figure 5
-        fr_token_sim = torch.softmax(torch.matmul(F.normalize((src[:video_length] - ctx_src_).permute(1, 0, 2), dim=2), F.normalize(gtoken, dim=1).T), dim=-1)# src : b 75 d, token : 10 x d --> b 75 10 得出是个prompt token的相似度
-        ### Calculate clip importance
-        frame_importance = attn_weights[:, :, self.args.num_dummies:].sum(2).clone().detach()  # (b, 75) Figure 3 Sum 那一步
-        ### Masking empty clips
-        for i in range(len(frame_importance)):
-            frame_importance[i][vlen[i]:] *= 0.
-        ### Normalize
-        frame_importance = (frame_importance / frame_importance.sum(1).unsqueeze(1)) * frame_importance.size(1)  # b 75 对每个视频的每个clip的重要性进行归一化
-        ### Scale the similarity with importance
-        fr_token_sim = fr_token_sim * frame_importance.unsqueeze(2).repeat(1, 1, fr_token_sim.size(2))  # b 75 10 Figure 5 矩阵左边的乘法 得到矩阵
-        fr_token_sim = fr_token_sim.mean(1) # b 10 Figure 5 矩阵上面的Sum
-        topk_val, topkidx = torch.topk(fr_token_sim, k=self.args.num_prompts, dim=1) # k=1
-        src_ = torch.zeros((len(fr_token_sim), self.d_model)).cuda() # b d (32, 256)
-        for i in range(len(fr_token_sim)):
-            src_[i] = (topk_val[i].unsqueeze(1) * gtoken[topkidx[i]]).sum(0) # [32, 10] * [10, 256] Figure 5 最右边的点乘
-        src_ = src_.reshape(1, src.size(1), -1) # 1 b d (1, 32, 256)
+        # ## Opt2. Coxbox Transformation weight
+        # # refpoint_weight_np = refpoint_weight.numpy()
 
-        ## Add context and distribution token
-        src_ = src_ + ctx_src_ # 1 b d (1, 32, 256) Figure 5 最后的加法
-        pos_ = gpos.reshape([1, 1, self.d_model]).repeat(1, pos_embed.shape[1], 1) # 1 b d (1, 32, 256)
-        mask_ = torch.tensor([[False]]).to(mask.device).repeat(mask.shape[0], 1)
-
-        src_, _ = self.t2v_encoder(src_, src_key_padding_mask=mask_, pos=pos_,
-                                             video_length=video_length, dummy=False)  # (L, batch_size, d) Figure 2 Sec. 3.4 Cross-Attention
-
-        # src = torch.cat([src_, t2v_src], dim=0) # Sec. 3.4的输出和Sec. 3.2的输出拼接 (1+143, 32, 256)
-        # mask = torch.cat([mask_, mask], dim=1) # (32, 145)
-        # pos_embed = torch.cat([pos_, pos_embed], dim=0) # (144, 32, 256)
-
+        # # 对每一列应用Box-Cox变换
+        # refpoint_weight = torch.stack(
+        #     [boxcox_cuda(refpoint_weight[:, i], lmbda=0) if torch.all(refpoint_weight[:, i] > 0) else refpoint_weight[:, i] 
+        #     for i in range(refpoint_weight.shape[1])], 
+        #     dim=1
+        # )
+        # # 将结果转换回Tensor
+        # # refpoint_weight = torch.from_numpy(refpoint_weight_np_boxcox)
+        
+        query_embed = torch.sum(refpoint_weight.unsqueeze(-1) * query_embed, dim=1)
+        refpoint_embed = query_embed.unsqueeze(0).repeat(10, 1, 1)  # (#queries, batch_size, d) torch.Size([10, 32, 2])
+        
         src = t2v_src[:video_length] # Sec. 3.2的输出取出video的token直接做输入 (75, 32, 256）
         mask = mask[:, :video_length] # (32, 75)
         pos_embed = pos_embed[:video_length] # (75, 32, 256)
 
-        # src = src[:video_length + 1] # (1+75, 32, 256) 包含Saliency Token和视频的信息 作为Figure 2 prediction transformer encoder的输入 
-        # mask = mask[:, :video_length + 1] # torch.Size([32, 76])
-        # pos_embed = pos_embed[:video_length + 1] # torch.Size([76, 32, 256])
-
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)  # (L, batch_size, d) Figure 2 prediction transformer encoder
-        # memory_global, memory_local = memory[0], memory[1:] # memory_global: (32, 256) memory_local: (75, 32, 256)
-        # memory_local += memory_global.unsqueeze(0).repeat(memory_local.size(0), 1, 1) # 把global信息加到local上
-        # mask_local = mask[:, 1:]
-        # pos_embed_local = pos_embed[1:]
 
         memory_local = memory# memory_global: (32, 256) memory_local: (75, 32, 256)
         memory_global = memory_local.mean(0) # memory_global: (32, 256) memory_local: (75, 32, 256)
@@ -207,8 +173,13 @@ class Transformer(nn.Module):
                           pos=pos_embed_local, refpoints_unsigmoid=refpoint_embed)  # hs:(#layers, #queries, batch_size, d) (3, 32, 10, 256) references: [3, 32, 10, 2] Figure 2 Prediction Transformer Decoder
         memory_local = memory_local.transpose(0, 1)  # (batch_size, L, d) (32, 75, 256)
 
-        return src, hs, references, memory_local, memory_global, attn_weights, mmemory_moment, nmmemory_moment, mmemory_frames, nmmemory_frames
+        return hs, references, memory_local, memory_global, attn_weights
 
+def boxcox_cuda(tensor, lmbda=0):
+    if lmbda == 0:
+        return torch.log(tensor+0.0001)
+    else:
+        return (tensor ** lmbda - 1) / lmbda
 
 class TransformerCATEEncoder(nn.Module):
     def __init__(self, encoder_layer, num_layers, norm=None, return_intermediate=False):

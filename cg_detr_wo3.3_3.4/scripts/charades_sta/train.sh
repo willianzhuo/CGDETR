@@ -48,7 +48,7 @@ dummy_layers=2
 moment_layers=1
 sent_layers=1
 
-PYTHONPATH=$PYTHONPATH:. python cg_detr/train.py \
+PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
 --dset_name ${dset_name} \
 --ctx_mode ${ctx_mode} \
 --train_path ${train_path} \

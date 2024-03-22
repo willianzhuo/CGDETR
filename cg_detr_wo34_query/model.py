@@ -98,6 +98,13 @@ class CGDETR(nn.Module):
         self.query_embed = nn.Embedding(num_queries, 2) # 控制最终输出的预测moment的数量 用于生成查询嵌入
         relu_args = [True] * 3
         relu_args[n_input_proj-1] = False
+        # self.query_proj = nn.Sequential(*[
+        #     LinearLayer(hidden_dim, 128, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
+        #     LinearLayer(128, 64, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
+        #     LinearLayer(64, 16, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
+        #     LinearLayer(16, 4, layer_norm=True, dropout=input_dropout, relu=relu_args[1]),
+        #     LinearLayer(4, 2, layer_norm=True, dropout=input_dropout, relu=relu_args[1])
+        # ])
         self.input_txt_proj = nn.Sequential(*[
             LinearLayer(txt_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[0]),
             LinearLayer(hidden_dim, hidden_dim, layer_norm=True, dropout=input_dropout, relu=relu_args[1]),
@@ -160,6 +167,7 @@ class CGDETR(nn.Module):
                - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                                 dictionnaries containing the two above keys for each decoder layer.
         """
+
         ## For discovering real negative samples
         if vid is not None: ## for demo (run_on_video/run.py)
             _count = [v.count('_') for v in vid]
@@ -173,8 +181,9 @@ class CGDETR(nn.Module):
             src_vid = torch.cat([src_vid, src_aud], dim=2)
         # Project inputs to the same hidden dimension
         src_vid = self.input_vid_proj(src_vid)
-        # src_vid1 = src_vid
-        src_txt = self.input_txt_proj(src_txt)
+        src_txt = self.input_txt_proj(src_txt) # torch.Size([32, 28, 256])
+        query_proj = self.query_proj(src_txt) # torch.Size([32, 28, 2])
+        # query_proj = torch.mean(query_proj, dim=1) # torch.Size([32, 2])
         # Add type embeddings
         src_vid = src_vid + self.token_type_embeddings(torch.full_like(src_vid_mask.long(), 1))
         src_txt = src_txt + self.token_type_embeddings(torch.zeros_like(src_txt_mask.long()))
@@ -208,51 +217,6 @@ class CGDETR(nn.Module):
         mask = torch.cat([src_vid_mask, src_txt_mask_dummy], dim=1).bool()  # (bsz, L_vid+L_txt)
         pos = torch.cat([pos_vid, pos_txt_dummy], dim=1) # torch.Size([32, 143, 256])
 
-
-
-
-        # ### sentence token 见Figure 4 Sec. 3.3 figure 4 (a)
-        # smask_ = torch.tensor([[True]]).to(mask.device).repeat(src_txt_mask.shape[0], 1) # sentence token mask [32,1]
-        # smask = torch.cat([smask_, src_txt_mask.bool()], dim=1) # [32,1+23] 把sentence token的mask插入到src_txt_mask的前面
-        # ssrc_ = self.sent_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_txt.shape[0], 1, 1) # sentence token [32,1,256]
-        # ssrc = torch.cat([ssrc_, src_txt], dim=1) # [32,24,256] 把sentence token插入到src_txt的前面
-        # spos_ = self.sent_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_txt.shape[0], 1, 1)  # sentence token pos embeding [32,1,256]
-        # spos = torch.cat([spos_, pos_txt], dim=1) # [32,24,256] 把sentence token的pos插入到pos_txt的pos前面
-        # ### dummy sentence token 见Figure 4
-        # smaskd = torch.cat([smask_, mask_txt_dummy.bool()], dim=1) # [32,1+45] 把sentence token的mask插入到dummy的mask的前面
-        # ssrcd = torch.cat([ssrc_, dummy_token], dim=1) # [32,1+45,256] 把sentence token插入到dummy token的前面
-        # sposd = torch.cat([spos_, pos_dummy], dim=1) # [32,1+45,256] 把sentence token的pos插入到dummy token的pos的前面
-
-        if targets is not None: # train 只有训练阶段需要计算moment2txt_similarity和nmoment2txt_similarity 即Sec. 3.3
-            ### for moment token #### Sec. 3.3 figure 4 (a)
-            ### src_vid_mask和moment_mask_的区别？前者代表视频长度的表达，因为都填充到了75，所以有些短一些的视频tensor的第二维后面用0填充了，后者表示与视频中与query相关的片段的mask 这里相乘的目的是什么？ 
-            mmask_ = torch.tensor([[True]]).to(mask.device).repeat(src_vid_mask.shape[0], 1) # moment token mask [32,1] Moment Token代表与query相关的片段的单个token
-            mmask = torch.cat([mmask_, src_vid_mask.bool()], dim=1) # [32,1+75] 把moment token的mask插入到src_vid_mask的前面
-            moment_mask_ = torch.clamp(targets["relevant_clips"], 0, 1).bool() # [32,75] 1代表有moment. 创建一个新的布尔张量 moment_mask_，它的每个元素都是 targets["relevant_clips"] 中对应元素夹紧在 0 和 1 之间后的布尔值,即找出了与query相关的片段，相应的clip标记为1
-            moment_mask = torch.cat([mmask_, moment_mask_], dim=1) # [32,1+75] 把moment token的mask插入到moment_mask_的前面
-            mmask = mmask * moment_mask # [32,76] 逐元素相乘，只有视频长度以内且与query相关的mask是1，其他的mask是0
-
-            msrc_ = self.moment_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_vid.shape[0], 1, 1) # torch.Size([32, 1, 256]) 单独moment token的token
-            msrc = torch.cat([msrc_, src_vid], dim=1) # torch.Size([32, 76, 256]) 把moment token插入到src_vid的前面
-            mpos_ = self.moment_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_vid.shape[0], 1, 1) # torch.Size([32, 1, 256]) 单独moment token的pos
-            mpos = torch.cat([mpos_, pos_vid], dim=1) # torch.Size([32, 76, 256]) 把moment token的pos插入到vid的pos前面
-
-
-            ### for Not moment token ####
-            nmmask_ = torch.tensor([[True]]).to(mask.device).repeat(src_vid_mask.shape[0], 1) # not moment mask
-            nmmask = torch.cat([nmmask_, src_vid_mask.bool()], dim=1)
-            nmoment_mask_ = ~(torch.clamp(targets["relevant_clips"], 0, 1).bool()) # 1代表没有moment 与上面的moment_mask_相反
-            nmoment_mask = torch.cat([nmmask_, nmoment_mask_], dim=1)
-            nmmask = nmmask * nmoment_mask # 逐元素相乘，只有视频长度以内且与query不相关的mask是1，其他的mask是0
-
-            nmsrc_ = self.moment_rep_token.reshape([1, 1, self.hidden_dim]).repeat(src_vid.shape[0], 1, 1) # [32,1,256]
-            nmsrc = torch.cat([nmsrc_, src_vid], dim=1) # [32,1+75,256] 跟上面的msrc一样，只是这里是叫not moment token
-            nmpos_ = self.moment_rep_pos.reshape([1, 1, self.hidden_dim]).repeat(pos_vid.shape[0], 1, 1) # [32,1,256]
-            nmpos = torch.cat([nmpos_, pos_vid], dim=1)
-            ########### 上面四行代码为什么要重复前面的moment token的操作？为什么不直接用msrc和mpos？已检查，这里的msrc和mpos与前面的是一样的，所以可以直接用msrc和mpos代替nmsrc和nmpos
-        else:
-            moment_mask_ = None
-
         # for t2vidavg sal token
         vidsrc_ = torch.zeros((len(src_vid), 1, self.hidden_dim)).cuda() # [32,1,256]
         for i in range(len(src_vid)):
@@ -260,28 +224,10 @@ class CGDETR(nn.Module):
 
         video_length = src_vid.shape[1] # 75
         if targets is not None: ## train
-            # # Sec. 3.3 Figure 4 (a) sentence encoder
-            # ssrc = ssrc.permute(1, 0, 2)  # (L, batch_size, d)
-            # spos = spos.permute(1, 0, 2)  # (L, batch_size, d)
-            # smemory = self.scls_encoder(ssrc, src_key_padding_mask=~smask, pos=spos)  # (L, batch_size, d)
-            # sentence_txt, smemory_words = smemory[0], smemory[1:] # sentence_txt : (batch_size, d) 对应图中的S1+, smemory_words: torch.Size([26(可变), 32, 256])
-
-            # # Sec. 3.3 Figure 4 (a) sentence encoder for dummy
-            # ssrcd = ssrcd.permute(1, 0, 2)  # (L, batch_size, d)
-            # sposd = sposd.permute(1, 0, 2)  # (L, batch_size, d)
-            # smemoryd = self.scls_encoder(ssrcd, src_key_padding_mask=~smaskd, pos=sposd)  # (L, batch_size, d)
-            # sentence_dummy, smemory_words_dummy = smemoryd[0], smemoryd[1:] # sentence_dummy : (batch_size, d)(32,256) 对应图中的S1-, smemory_words_dummy: torch.Size([45, 32, 256])
-
-            # txt_dummy_proj = torch.cat([smemory_words_dummy, smemory_words], dim=0) # 把sentence和dummy的prototype concat到一起，用于计算moment2txt_similarity和nmoment2txt_similarity 
-
-            src, hs, reference, memory, memory_global, attn_weights, memory_moment, nmmemory_moment, mmemory_frames, nmmemory_frames = self.transformer(src, ~mask, self.query_embed.weight, pos, video_length=video_length, moment_idx=targets["relevant_clips"], msrc=msrc, mpos=mpos, mmask=~mmask, nmsrc=nmsrc, nmpos=nmpos, nmmask=~nmmask,
+            hs, reference, memory, memory_global, attn_weights = self.transformer(src, ~mask, query_proj, pos, video_length=video_length, moment_idx=targets["relevant_clips"],
                                                                                                                   ctxtoken=vidsrc_, gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask.sum(1).long())
-            # moment2txt_similarity = torch.matmul(mmemory_frames.permute(1, 0, 2), txt_dummy_proj.permute(1, 2, 0)) # Figure 4 (b) 用于计算moment2txt_similarity
-            # nmoment2txt_similarity = torch.matmul(nmmemory_frames.permute(1, 0, 2), txt_dummy_proj.permute(1, 2, 0))
-            sentence_dummy, sentence_txt, moment2txt_similarity, nmoment2txt_similarity = None, None, None, None
         else: ## inference
-            sentence_dummy, sentence_txt, moment2txt_similarity, nmoment2txt_similarity = None, None, None, None
-            src, hs, reference, memory, memory_global, attn_weights, memory_moment, nmmemory_moment, mmemory_frames, nmmemory_frames = self.transformer(src, ~mask, self.query_embed.weight, pos, video_length=video_length,
+            hs, reference, memory, memory_global, attn_weights = self.transformer(src, ~mask, query_proj, pos, video_length=video_length,
                                                                                                                   ctxtoken=vidsrc_, gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask.sum(1).long())
         outputs_class = self.class_embed(hs)  # (#layers, batch_size, #queries, #classes) [3, 32, 10, 2] 将隐藏层的输出hs输入到全连接层中，得到输出outputs_class
         reference_before_sigmoid = inverse_sigmoid(reference) # (#layers, batch_size, #queries, 2) [3, 32, 10, 2] 将reference的输出输入到inverse_sigmoid中，得到输出reference_before_sigmoid
@@ -320,8 +266,9 @@ class CGDETR(nn.Module):
                 src_dummy_neg = src_dummy_neg[real_neg_mask] # [32, 143, 256]
                 pos_neg = pos_neg[real_neg_mask]
                 src_txt_mask_dummy_neg = src_txt_mask_dummy_neg[real_neg_mask]
+                query_proj = query_proj[real_neg_mask]
 
-                _, _, _, memory_neg, memory_global_neg, attn_weights_neg, _, _, _, _ = self.transformer(src_dummy_neg, ~mask_dummy_neg, self.query_embed.weight, pos_neg, video_length=video_length,
+                _, _, memory_neg, memory_global_neg, attn_weights_neg = self.transformer(src_dummy_neg, ~mask_dummy_neg, query_proj, pos_neg, video_length=video_length,
                                                                                                ctxtoken=vidsrc_[real_neg_mask], gtoken=self.global_rep_token, gpos=self.global_rep_pos, vlen=src_vid_mask[real_neg_mask].sum(1).long())
                 vid_mem_neg = memory_neg[:, :src_vid.shape[1]] # (bsz, L_vid, d)
                 out["saliency_scores_neg"] = (torch.sum(self.saliency_proj1(vid_mem_neg) * self.saliency_proj2(memory_global_neg).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim))
@@ -340,17 +287,6 @@ class CGDETR(nn.Module):
 
 
         out["saliency_scores"] = (torch.sum(self.saliency_proj1(vid_mem) * self.saliency_proj2(memory_global).unsqueeze(1), dim=-1) / np.sqrt(self.hidden_dim)) # [32, 75, 256] * [32, 256] / sqrt(256) -> [32, 75]
-        out["memory_moment"] = memory_moment
-        out["nmmemory_moment"] = nmmemory_moment
-
-        ## sentence token embeeded with text / dummy
-        out["sentence_txt"] = sentence_txt
-        out["sentence_dummy"] = sentence_dummy
-        out["moment2txt_similarity"] = moment2txt_similarity
-        out["nmoment2txt_similarity"] = nmoment2txt_similarity
-        out["cate_attn_weights"] = attn_weights
-        out["moment_mask"] = moment_mask_
-        out["txt_mask"] = src_txt_mask_dummy
 
 
         out["t2vattnvalues"] = (attn_weights[:,:,self.args.num_dummies:] * (src_txt_mask.unsqueeze(1).repeat(1, video_length, 1))).sum(2) # (batch_size, L_vid, L_txt) / (batch_size, L_txt)
@@ -358,20 +294,23 @@ class CGDETR(nn.Module):
         out["dummy_tokens"] = dummy_token
         out["global_rep_tokens"] = self.global_rep_token
 
-
-        if targets is not None:
-            out["src_vid"] = mmemory_frames.permute(1, 0, 2) * moment_mask_.unsqueeze(2) + nmmemory_frames.permute(1, 0, 2) * (~(moment_mask_.unsqueeze(2).bool())).float()
-        else:
-            out["src_vid"] = None
-
         out["video_mask"] = src_vid_mask
-
+        ## 根据query token和moment token（=原始clip token求平均）计算query和预测区间的相似度分数
+        # 计算出预测区间包含的clip的token的平均值
+        # 找出pred_spans中的每个区间的clip
+        # pred_spans = out["pred_spans"]
+        # moment_token = []
+        # for i in range(pred_spans.shape[0]):
+        #     start = pred_spans[i, :, 0].long()
+        #     end = pred_spans[i, :, 1].long()
+        #     clips = src_vid[i, start:end+1, :]
+        #     moment_token.append(clips)
+        # moment_token = torch.stack(moment_token, dim=0)
+        # moment_token = src_vid[:, out["pred_spans"][..., 1] - out["pred_spans"][..., 0], :].mean(dim=1)
+        
         out["query_token"] = src_txt.mean(dim=1) # torch.Size([32, 256])
-        # out["vid_token"] = src_vid1 # 原始的视频特征
-        # out["vid_token"] = src.permute(1, 0, 2) # [75, bs, 256]->[bs, 75, 256] aca出来的视频特征
-        out["vid_token"] = vid_mem # ecoder输出的视频特征
-
-
+        out["vid_token"] = src_vid
+        
         if self.aux_loss:
             # assert proj_queries and proj_txt_mem
             out['aux_outputs'] = [

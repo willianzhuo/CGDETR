@@ -2,38 +2,18 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Debug cg_detr",
+            "name": "Python: Debug cg_detr1",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/cg_detr/train.py",
+            "program": "${workspaceFolder}/cg_detr/inference.py",
             "console": "integratedTerminal",
             "args": [
-                "--dset_name", "hl",
-                "--ctx_mode", "video_tef",
-                "--train_path", "data/highlight_train_release.jsonl",
-                "--eval_path", "data/highlight_val_release.jsonl",
+                "--resume", "results/hl-video_tef-exp-2024-03-18-17-16-17/model_best.ckpt",
                 "--eval_split_name", "val",
-                "--v_feat_dirs", "features/qvhighlight/slowfast_features",
-                "--v_feat_dim", "2304",
-                "--t_feat_dir", "features/qvhighlight/clip_text_features/",
-                "--t_feat_dim", "512",
-                "--bsz", "32",
-                "--results_root", "results",
-                "--exp_id", "exp",
-                "--enc_layers", "3",
-                "--dec_layers", "3",
-                "--t2v_layers", "2",
-                "--moment_layers", "1",
-                "--dummy_layers", "2",
-                "--sent_layers", "1",
-                "--max_v_l", "75",
-                "--max_q_l", "32",
-                "--num_encoder_layers", "3",
-                "--eval_epoch", "1",
+                "--eval_path", "data/highlight_val_release.jsonl"
             ],
             "env": {
-                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}",
-                //"CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
             },
             "cwd": "${workspaceFolder}",
             "python": "/home/zhuocao/zhuocao/anaconda3/envs/video_new/bin/python" 

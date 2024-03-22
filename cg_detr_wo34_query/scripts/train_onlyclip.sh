@@ -1,17 +1,17 @@
-dset_name=tacos
+dset_name=hl
 ctx_mode=video_tef
-v_feat_types=slowfast_clip
-t_feat_type=clip
-results_root=results_tacos
-exp_id=exp
+v_feat_types=clip
+t_feat_type=clip 
+results_root=results
+exp_id=clip
 
 ######## data paths
-train_path=data/tacos/train.jsonl
-eval_path=data/tacos/val.jsonl
+train_path=data/highlight_train_release.jsonl
+eval_path=data/highlight_val_release.jsonl
 eval_split_name=val
 
 ######## setup video+text features
-feat_root=features/tacos
+feat_root=../features/qvhighlight
 
 # video features
 v_feat_dim=0
@@ -36,22 +36,16 @@ fi
 
 #### training
 bsz=32
-lr=2e-4
-lr_drop=200
-n_epoch=200
-clip_length=2
 enc_layers=3
 dec_layers=3
 t2v_layers=2
 moment_layers=1
 dummy_layers=2
 sent_layers=1
-eval_bsz=32
-num_dummies=50
-num_prompts=2
-total_prompts=10
+max_v_l=75
+max_q_l=32
 
-PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
+PYTHONPATH=$PYTHONPATH:. python cg_detr/train.py \
 --dset_name ${dset_name} \
 --ctx_mode ${ctx_mode} \
 --train_path ${train_path} \
@@ -64,21 +58,12 @@ PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
 --bsz ${bsz} \
 --results_root ${results_root} \
 --exp_id ${exp_id} \
---max_v_l -1 \
---clip_length ${clip_length} \
---lr ${lr} \
---lr_drop ${lr_drop} \
---n_epoch ${n_epoch} \
---contrastive_align_loss_coef 0.002 \
---lw_saliency 4 \
 --enc_layers ${enc_layers} \
 --dec_layers ${dec_layers} \
 --t2v_layers ${t2v_layers} \
 --moment_layers ${moment_layers} \
 --dummy_layers ${dummy_layers} \
 --sent_layers ${sent_layers} \
---eval_bsz ${eval_bsz} \
---num_dummies ${num_dummies} \
---num_prompts ${num_prompts} \
---total_prompts ${total_prompts} \
+--max_v_l ${max_v_l} \
+--max_q_l ${max_q_l} \
 ${@:1}

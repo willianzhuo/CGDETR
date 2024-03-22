@@ -6,7 +6,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 import torch.nn.functional as F
-from cg_detr_wo34.span_utils import generalized_temporal_iou, span_cxw_to_xx
+from cg_detr.span_utils import generalized_temporal_iou, span_cxw_to_xx
 
 
 class HungarianMatcher(nn.Module):

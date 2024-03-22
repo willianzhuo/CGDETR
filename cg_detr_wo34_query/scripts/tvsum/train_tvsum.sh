@@ -1,36 +1,31 @@
-dset_name=youtube_uni
+dset_name=tvsum
 ctx_mode=video_tef
 v_feat_types=slowfast_clip
 t_feat_type=clip 
-results_root=results_youtubeuni
+results_root=results_tvsum
 exp_id=exp
 
 
 ######## data paths
-# train_path=data/youtube_uni/youtube_train.jsonl
-# eval_path=data/youtube_uni/youtube_anno.jsonl
-train_path=data/youtube_uni/youtube_train.jsonl
-eval_path=data/youtube_uni/youtube_valid.jsonl
+train_path=data/tvsum/tvsum_train.jsonl
+eval_path=data/tvsum/tvsum_val.jsonl
 eval_split_name=val
 
 ######## setup video+text features
-# feat_root=../features/tvsum
-feat_root=features/youtube_uni
+feat_root=features/tvsum
 
 # # video features
-v_feat_dim=2816
+v_feat_dim=2048
 v_feat_dirs=()
-v_feat_dirs+=(${feat_root}/vid_clip)
-v_feat_dirs+=(${feat_root}/vid_slowfast)
+v_feat_dirs+=(${feat_root}/video_features)
 
 # # text features
-t_feat_dir=${feat_root}/txt_clip/ # maybe not used
+t_feat_dir=${feat_root}/query_features/ # maybe not used
 t_feat_dim=512
-
 
 #### training
 bsz=4
-lr=2e-4
+lr=1e-3
 enc_layers=3
 dec_layers=3
 t2v_layers=2
@@ -38,15 +33,16 @@ moment_layers=1
 dummy_layers=2
 sent_layers=1
 
-for num_dummies in 1
-do 
+######## TVSUM domain name
+for dset_domain in BK BT DS FM GA MS PK PR VT VU
+do
     for seed in 2018
-    do 
-        for dset_domain in dog gymnastics parkour skating skiing surfing
+    do
+        for num_dummies in 3
         do
             for num_prompts in 1 2
             do
-                PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
+                PYTHONPATH=$PYTHONPATH:. python cg_detr/train.py \
                 --dset_name ${dset_name} \
                 --ctx_mode ${ctx_mode} \
                 --train_path ${train_path} \
@@ -72,12 +68,9 @@ do
                 --moment_layers ${moment_layers} \
                 --dummy_layers ${dummy_layers} \
                 --sent_layers ${sent_layers} \
-                --clip_length 1 \
-                --lw_saliency 4 \
                 --num_dummies ${num_dummies} \
                 --num_prompts ${num_prompts} \
                 --total_prompts 10 \
-                --num_workers 4
                 ${@:1}
             done
         done

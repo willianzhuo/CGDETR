@@ -51,7 +51,7 @@ num_dummies=50
 num_prompts=2
 total_prompts=10
 
-PYTHONPATH=$PYTHONPATH:. python cg_detr/train.py \
+PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
 --dset_name ${dset_name} \
 --ctx_mode ${ctx_mode} \
 --train_path ${train_path} \

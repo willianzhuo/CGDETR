@@ -1,17 +1,17 @@
-dset_name=tacos
+dset_name=charadesSTA
 ctx_mode=video_tef
 v_feat_types=slowfast_clip
-t_feat_type=clip
-results_root=results_tacos
+t_feat_type=clip 
+results_root=results_charadesSTA
 exp_id=exp
 
 ######## data paths
-train_path=data/tacos/train.jsonl
-eval_path=data/tacos/val.jsonl
+train_path=data/charades_sta/charades_sta_train_tvr_format.jsonl
+eval_path=data/charades_sta/charades_sta_test_tvr_format.jsonl
 eval_split_name=val
 
 ######## setup video+text features
-feat_root=features/tacos
+feat_root=features/charades
 
 # video features
 v_feat_dim=0
@@ -36,22 +36,19 @@ fi
 
 #### training
 bsz=32
-lr=2e-4
-lr_drop=200
-n_epoch=200
-clip_length=2
+eval_bsz=32
+num_dummies=45
+num_prompts=2
+total_prompts=10
+lr_drop=400
 enc_layers=3
 dec_layers=3
 t2v_layers=2
-moment_layers=1
 dummy_layers=2
+moment_layers=1
 sent_layers=1
-eval_bsz=32
-num_dummies=50
-num_prompts=2
-total_prompts=10
 
-PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
+PYTHONPATH=$PYTHONPATH:. python cg_detr/train.py \
 --dset_name ${dset_name} \
 --ctx_mode ${ctx_mode} \
 --train_path ${train_path} \
@@ -65,10 +62,10 @@ PYTHONPATH=$PYTHONPATH:. python cg_detr_wo3.3_3.4/train.py \
 --results_root ${results_root} \
 --exp_id ${exp_id} \
 --max_v_l -1 \
---clip_length ${clip_length} \
---lr ${lr} \
+--clip_length 1 \
+--lr 0.0002 \
 --lr_drop ${lr_drop} \
---n_epoch ${n_epoch} \
+--n_epoch 200 \
 --contrastive_align_loss_coef 0.002 \
 --lw_saliency 4 \
 --enc_layers ${enc_layers} \
